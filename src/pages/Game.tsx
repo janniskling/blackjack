@@ -483,14 +483,18 @@ export default function Game() {
             <div className="bet-input-area">
               <p className="my-chips-label">Your chips: <span className="chips-display">🪙 {fmt(myChips)}</span></p>
               <div className="bet-presets">
-                {[0.25, 0.5, 0.75, 1].map(frac => {
-                  const amount = Math.max(1, Math.floor(myChips * frac));
-                  return (
-                    <button key={frac} className="btn btn-secondary" onClick={() => setBetInput(amount)}>
-                      {frac === 1 ? 'All in' : `${frac * 100}%`}
-                    </button>
-                  );
-                })}
+                {[50, 100, 500].map(amount => (
+                  <button
+                    key={amount}
+                    className="btn btn-secondary"
+                    onClick={() => setBetInput(prev => Math.min(prev + amount, myChips))}
+                  >
+                    +{amount}
+                  </button>
+                ))}
+                <button className="btn btn-secondary" onClick={() => setBetInput(myChips)}>
+                  All in
+                </button>
               </div>
               <div className="bet-slider-row">
                 <input
