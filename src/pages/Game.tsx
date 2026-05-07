@@ -432,7 +432,8 @@ export default function Game() {
   const currentHand = currentEntry
     ? gameState.player_hands[currentEntry.player_id]?.[currentEntry.hand_index]
     : null;
-  const canDouble = isMyTurn && currentHand?.cards.length === 2 && myChips >= (currentHand?.bet ?? 0);
+  const currentHandValue = currentHand ? calculateHand(currentHand.cards) : 0;
+  const canDouble = isMyTurn && currentHand?.cards.length === 2 && myChips >= (currentHand?.bet ?? 0) && [9, 10, 11].includes(currentHandValue);
   const canSplitHand = isMyTurn && currentHand !== null && currentHand !== undefined && canSplit(currentHand.cards) && myChips >= (currentHand?.bet ?? 0);
 
   const dealerVisibleCards = gameState.phase === 'player_turns'
