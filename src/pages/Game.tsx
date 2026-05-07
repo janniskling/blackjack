@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import type { GameState, Player, PlayerHand, PlayOrderEntry } from '../lib/supabase';
-import { subscribeToGameState } from '../lib/realtime';
+import { subscribeToGameState, subscribeToPlayers } from '../lib/realtime';
 import {
   calculateHand,
   canSplit,
@@ -48,14 +48,23 @@ export default function Game() {
     });
   }, [code, navigate]);
 
-  // ── Realtime subscription ───────────────────────────────────────────────────
+  // ── Realtime subscriptions ──────────────────────────────────────────────────
   useEffect(() => {
     if (!roomId) return;
-    const channel: RealtimeChannel = subscribeToGameState(roomId, gs => {
+    const gsChannel: RealtimeChannel = subscribeToGameState(roomId, gs => {
       setGameState(gs);
-      dealerRanRef.current = false; // reset on any new state
+      dealerRanRef.current = false;
     });
-    return () => { channel.unsubscribe(); };
+    const plChannel: RealtimeChannel = subscribeToPlayers(roomId, updatedPlayers => {
+      setPlayers(updatedPlayers);
+      // If current player was deactivated (cashed out by another client), go home
+      const myId = localStorage.getItem('playerId');
+      if (myId && !updatedPlayers.some(p => p.id === myId)) {
+        localStorage.removeItem('playerId');
+        localStorage.removeItem('roomCode');
+      }
+    });
+    return () => { gsChannel.unsubscribe(); plChannel.unsubscribe(); };
   }, [roomId]);
 
   // ── Auto-run dealer phase ───────────────────────────────────────────────────
@@ -357,16 +366,25 @@ export default function Game() {
   // ── Next round ──────────────────────────────────────────────────────────────
   async function handleNextRound() {
     if (!gameState) return;
-    // Remove players who are out of chips
     const chips = gameState.player_chips;
+
+    // Deactivate players with 0 chips
     for (const p of players) {
       if ((chips[p.id] ?? 0) <= 0) {
         await supabase.from('players').update({ is_active: false }).eq('id', p.id);
       }
     }
 
-    const remainingPlayers = players.filter(p => (chips[p.id] ?? 0) > 0);
-    const emptyHands = Object.fromEntries(players.map(p => [p.id, []]));
+    // Re-fetch active players fresh from DB so cashed-out players are excluded
+    const { data: activePlayers } = await supabase
+      .from('players')
+      .select()
+      .eq('room_id', roomId)
+      .eq('is_active', true)
+      .order('created_at');
+
+    const remaining = (activePlayers ?? []) as Player[];
+    const emptyHands = Object.fromEntries(remaining.map(p => [p.id, []]));
 
     await supabase.from('game_state').update({
       deck: [],
@@ -380,8 +398,7 @@ export default function Game() {
       updated_at: new Date().toISOString(),
     }).eq('room_id', roomId);
 
-    // Update local players list
-    setPlayers(remainingPlayers);
+    setPlayers(remaining);
   }
 
   // ── Cashout ─────────────────────────────────────────────────────────────────
