@@ -39,7 +39,17 @@ export default function Lobby() {
           .eq('room_id', data.id)
           .eq('is_active', true)
           .order('created_at')
-          .then(({ data: p }) => { if (p) setPlayers(p as Player[]); });
+          .then(({ data: p }) => {
+            if (!p) return;
+            setPlayers(p as Player[]);
+            // If current player is no longer active (cashed out), redirect home
+            const myId = localStorage.getItem('playerId');
+            if (myId && !p.some(pl => pl.id === myId)) {
+              localStorage.removeItem('playerId');
+              localStorage.removeItem('roomCode');
+              navigate('/');
+            }
+          });
       });
   }, [code, navigate]);
 

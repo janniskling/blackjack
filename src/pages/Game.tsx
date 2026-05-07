@@ -388,6 +388,8 @@ export default function Game() {
   async function handleCashout() {
     const chips = gameState?.player_chips[myPlayerId] ?? 0;
     await supabase.from('players').update({ is_active: false, chips }).eq('id', myPlayerId);
+    localStorage.removeItem('playerId');
+    localStorage.removeItem('roomCode');
     navigate('/');
   }
 
