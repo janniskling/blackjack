@@ -201,6 +201,8 @@ export default function Game() {
 
       const newChips = { ...gameState.player_chips };
       for (const p of activePlayers) {
+        // Initialize chips from DB for mid-game joiners not yet in player_chips
+        if (!(p.id in newChips)) newChips[p.id] = p.chips;
         newChips[p.id] -= newBets[p.id];
       }
 
@@ -368,14 +370,14 @@ export default function Game() {
     if (!gameState) return;
     const chips = gameState.player_chips;
 
-    // Deactivate players with 0 chips
+    // Deactivate players with 0 chips (use DB chips as fallback for new joiners)
     for (const p of players) {
-      if ((chips[p.id] ?? 0) <= 0) {
+      if ((chips[p.id] ?? p.chips) <= 0) {
         await supabase.from('players').update({ is_active: false }).eq('id', p.id);
       }
     }
 
-    // Re-fetch active players fresh from DB so cashed-out players are excluded
+    // Re-fetch active players fresh from DB (includes new mid-game joiners)
     const { data: activePlayers } = await supabase
       .from('players')
       .select()
@@ -384,6 +386,12 @@ export default function Game() {
       .order('created_at');
 
     const remaining = (activePlayers ?? []) as Player[];
+
+    // Add chips for players who joined mid-game and aren't in player_chips yet
+    for (const p of remaining) {
+      if (!(p.id in chips)) chips[p.id] = p.chips;
+    }
+
     const emptyHands = Object.fromEntries(remaining.map(p => [p.id, []]));
 
     await supabase.from('game_state').update({
@@ -417,7 +425,9 @@ export default function Game() {
 
   const currentEntry = gameState.play_order[gameState.current_player_index];
   const isMyTurn = currentEntry?.player_id === myPlayerId && gameState.phase === 'player_turns';
-  const myChips = gameState.player_chips[myPlayerId] ?? 0;
+  const myPlayer = players.find(p => p.id === myPlayerId);
+  // New mid-game joiners aren't in player_chips yet — fall back to their DB chips
+  const myChips = gameState.player_chips[myPlayerId] ?? myPlayer?.chips ?? 0;
   const myHasBet = myPlayerId in gameState.player_bets;
   const currentHand = currentEntry
     ? gameState.player_hands[currentEntry.player_id]?.[currentEntry.hand_index]
@@ -433,7 +443,8 @@ export default function Game() {
 
   // ── Betting phase ────────────────────────────────────────────────────────────
   if (gameState.phase === 'betting') {
-    const activePlayers = players.filter(p => (gameState.player_chips[p.id] ?? 0) > 0);
+    // Fall back to DB chips for players who joined mid-game and aren't in player_chips yet
+    const activePlayers = players.filter(p => (gameState.player_chips[p.id] ?? p.chips) > 0);
 
     if (myChips <= 0) {
       return (
@@ -534,6 +545,12 @@ export default function Game() {
 
       {gameState.phase === 'dealer_turn' && <div className="phase-banner">Dealer's Turn…</div>}
       {gameState.phase === 'finished' && <div className="phase-banner">Round Over!</div>}
+      {/* Spectator notice for mid-game joiners */}
+      {gameState.phase !== 'finished' && !(myPlayerId in gameState.player_hands) && myPlayerId && (
+        <div className="phase-banner" style={{ background: 'rgba(240,208,96,0.12)', color: '#f0d060' }}>
+          You're joining next round — watching for now 👀
+        </div>
+      )}
 
       {/* Players */}
       <div className="players-row">

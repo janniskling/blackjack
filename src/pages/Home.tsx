@@ -73,7 +73,7 @@ export default function Home() {
         .single();
 
       if (roomErr || !room) { setJoinError('Room not found'); return; }
-      if (room.status !== 'waiting') { setJoinError('Game already in progress'); return; }
+      if (room.status === 'finished') { setJoinError('This room is closed'); return; }
 
       const { data: player, error: playerErr } = await supabase
         .from('players')
@@ -87,7 +87,8 @@ export default function Home() {
       localStorage.setItem('playerId', player.id);
       localStorage.setItem('roomCode', code);
 
-      navigate(`/room/${code}`);
+      // Go directly to game if already running, otherwise wait in lobby
+      navigate(room.status === 'playing' ? `/game/${code}` : `/room/${code}`);
     } catch (e: unknown) {
       setJoinError((e as Error).message || 'Failed to join room');
     } finally {
