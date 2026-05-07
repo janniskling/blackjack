@@ -406,6 +406,19 @@ body {
   width: 100%;
 }
 
+.room-code-small {
+  font-size: 0.85rem;
+  color: rgba(255,255,255,0.45);
+  letter-spacing: 1px;
+}
+
+.room-code-small span {
+  color: #f0d060;
+  font-weight: 800;
+  font-size: 1rem;
+  letter-spacing: 0.2em;
+}
+
 .betting-title {
   font-size: 1.6rem;
   font-weight: 800;

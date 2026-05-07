@@ -450,6 +450,7 @@ export default function Game() {
       <div className="game-table">
         <div className="betting-area">
           <h2 className="betting-title">Place Your Bets</h2>
+          <div className="room-code-small">Room: <span>{code}</span></div>
 
           <div className="players-bets-list">
             {activePlayers.map(p => {
