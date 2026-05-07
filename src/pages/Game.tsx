@@ -29,7 +29,14 @@ export default function Game() {
   const [roomId, setRoomId] = useState('');
   const [acting, setActing] = useState(false);
   const [betInput, setBetInput] = useState(100);
+  const [easterEgg, setEasterEgg] = useState(false);
   const dealerRanRef = useRef(false);
+  const broadcastRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  function triggerEasterEgg() {
+    setEasterEgg(true);
+    setTimeout(() => setEasterEgg(false), 2000);
+  }
 
   const myPlayerId = localStorage.getItem('playerId') || '';
 
@@ -57,14 +64,23 @@ export default function Game() {
     });
     const plChannel: RealtimeChannel = subscribeToPlayers(roomId, updatedPlayers => {
       setPlayers(updatedPlayers);
-      // If current player was deactivated (cashed out by another client), go home
       const myId = localStorage.getItem('playerId');
       if (myId && !updatedPlayers.some(p => p.id === myId)) {
         localStorage.removeItem('playerId');
         localStorage.removeItem('roomCode');
       }
     });
-    return () => { gsChannel.unsubscribe(); plChannel.unsubscribe(); };
+    const bcChannel = supabase
+      .channel(`easter_egg:${roomId}`)
+      .on('broadcast', { event: 'easter_egg' }, () => triggerEasterEgg())
+      .subscribe();
+    broadcastRef.current = bcChannel;
+    return () => {
+      gsChannel.unsubscribe();
+      plChannel.unsubscribe();
+      bcChannel.unsubscribe();
+      broadcastRef.current = null;
+    };
   }, [roomId]);
 
   // ── Auto-run dealer phase ───────────────────────────────────────────────────
@@ -157,6 +173,11 @@ export default function Game() {
     const myChips = gameState.player_chips[myPlayerId] ?? 0;
     const bet = Math.max(1, Math.min(betInput, myChips));
     setActing(true);
+
+    if (bet === 400) {
+      triggerEasterEgg();
+      broadcastRef.current?.send({ type: 'broadcast', event: 'easter_egg', payload: {} });
+    }
 
     try {
       const newBets = { ...gameState.player_bets, [myPlayerId]: bet };
@@ -647,6 +668,10 @@ export default function Game() {
             </button>
           </div>
         </div>
+      )}
+
+      {easterEgg && (
+        <div className="easter-egg-overlay">Lasst uns ownen 🃏</div>
       )}
     </div>
   );
