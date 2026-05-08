@@ -138,8 +138,8 @@ export default function Game() {
   // boxing_bets[target_player_id] = chips I'm staking on their hand this round
   const [myBoxingBets, setMyBoxingBets] = useState<Record<string, number>>({});
 
-  const dealerRanRef     = useRef(false);
-  const broadcastRef     = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const dealerRanRef      = useRef(false);
+  const lastEasterEggTs  = useRef(0);   // prevents double-trigger from our own DB echo
   const prevPhaseRef     = useRef<string | null>(null);
   const dealerAreaRef    = useRef<HTMLDivElement>(null);
   const playerColumnRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -172,6 +172,12 @@ export default function Game() {
   useEffect(() => {
     if (!roomId) return;
     const gsChannel: RealtimeChannel = subscribeToGameState(roomId, gs => {
+      // Easter egg: embedded as _ee timestamp in player_bets — reliable via postgres_changes
+      const eeTs = (gs.player_bets as Record<string, number>)._ee ?? 0;
+      if (eeTs > lastEasterEggTs.current) {
+        lastEasterEggTs.current = eeTs;
+        triggerEasterEgg();
+      }
       setGameState(gs);
       // Don't reset inside dealer_turn — an update mid-payout would cause double execution
       if (gs.phase !== 'dealer_turn') dealerRanRef.current = false;
@@ -184,16 +190,9 @@ export default function Game() {
         localStorage.removeItem('roomCode');
       }
     });
-    const bcChannel = supabase
-      .channel(`easter_egg:${roomId}`)
-      .on('broadcast', { event: 'easter_egg' }, () => triggerEasterEgg())
-      .subscribe();
-    broadcastRef.current = bcChannel;
     return () => {
       gsChannel.unsubscribe();
       plChannel.unsubscribe();
-      bcChannel.unsubscribe();
-      broadcastRef.current = null;
     };
   }, [roomId]);
 
@@ -459,14 +458,19 @@ export default function Game() {
     const bet = Math.min(betInput, myChips); // allow 0 for boxing-only bets
     setActing(true);
 
-    if (bet === 400) {
+    // Easter egg: trigger locally and embed a timestamp in player_bets so all
+    // other clients pick it up via the reliable postgres_changes subscription.
+    // We pre-set lastEasterEggTs to suppress the echo from our own DB update.
+    const eeTs = bet === 400 ? Date.now() : 0;
+    if (eeTs) {
       triggerEasterEgg();
-      broadcastRef.current?.send({ type: 'broadcast', event: 'easter_egg', payload: {} });
+      lastEasterEggTs.current = eeTs;
     }
 
     try {
       const pvpDealerId    = gameState.pvp_dealer_id ?? null;
-      const newBets        = { ...gameState.player_bets, [myPlayerId]: bet };
+      const rawBets        = { ...gameState.player_bets, [myPlayerId]: bet };
+      const newBets        = eeTs ? { ...rawBets, _ee: eeTs } : rawBets;
       // Use p.chips as fallback so players who joined during betting are included
       const allActive      = players.filter(p => (gameState.player_chips[p.id] ?? p.chips) > 0);
       const bettingPlayers = pvpDealerId ? allActive.filter(p => p.id !== pvpDealerId) : allActive;
