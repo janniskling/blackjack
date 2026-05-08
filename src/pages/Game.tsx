@@ -173,7 +173,8 @@ export default function Game() {
     if (!roomId) return;
     const gsChannel: RealtimeChannel = subscribeToGameState(roomId, gs => {
       setGameState(gs);
-      dealerRanRef.current = false;
+      // Don't reset inside dealer_turn — an update mid-payout would cause double execution
+      if (gs.phase !== 'dealer_turn') dealerRanRef.current = false;
     });
     const plChannel: RealtimeChannel = subscribeToPlayers(roomId, updatedPlayers => {
       setPlayers(updatedPlayers);
@@ -294,10 +295,14 @@ export default function Game() {
     animTimersRef.current.push(initTimer);
   }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reset local boxing bets whenever a new round starts
+  // Reset local state whenever a new round starts
   useEffect(() => {
-    if (gameState?.phase === 'betting') setMyBoxingBets({});
-  }, [gameState?.phase]);
+    if (!gameState || gameState.phase !== 'betting') return;
+    setMyBoxingBets({});
+    const chips = gameState.player_chips[myPlayerId]
+      ?? players.find(p => p.id === myPlayerId)?.chips ?? 0;
+    setBetInput(Math.min(100, chips > 0 ? chips : 100));
+  }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function isCardVisible(cardKey: string): boolean {
     return visibleCardKeys === null || visibleCardKeys.has(cardKey);
@@ -467,19 +472,22 @@ export default function Game() {
       const bettingPlayers = pvpDealerId ? allActive.filter(p => p.id !== pvpDealerId) : allActive;
       const allBet         = bettingPlayers.length > 0 && bettingPlayers.every(p => newBets[p.id] !== undefined);
 
-      // Merge my boxing bets into the running total for this round
-      const stateBoxing = gameState.boxing_bets ?? {};
-      const mergedBoxing: Record<string, Record<string, number>> = { ...stateBoxing };
+      // boxing_bets stored as { boxerId: { targetId: amount } } so each player
+      // writes only their own top-level key — minimises the concurrent-write race
+      const myValidBoxing: Record<string, number> = {};
       for (const [targetId, amount] of Object.entries(myBoxingBets)) {
-        if (amount > 0 && bettingPlayers.some(p => p.id === targetId)) {
-          mergedBoxing[targetId] = { ...(mergedBoxing[targetId] ?? {}), [myPlayerId]: amount };
-        }
+        if (amount > 0 && bettingPlayers.some(p => p.id === targetId))
+          myValidBoxing[targetId] = amount;
       }
+      const newBoxingBets: Record<string, Record<string, number>> = {
+        ...(gameState.boxing_bets ?? {}),
+      };
+      if (Object.keys(myValidBoxing).length > 0) newBoxingBets[myPlayerId] = myValidBoxing;
 
       if (!allBet) {
         await supabase.from('game_state').update({
           player_bets: newBets,
-          boxing_bets: mergedBoxing,
+          boxing_bets: newBoxingBets,
           updated_at: new Date().toISOString(),
         }).eq('room_id', roomId);
         return;
@@ -495,11 +503,23 @@ export default function Game() {
         const { card: c2, deck: d2 } = dealCard(deck); deck = d2;
         const cards  = [c1, c2];
         const status = isBlackjack(cards) ? 'blackjack' : 'playing';
-        const betsOnThisPlayer = mergedBoxing[p.id] ?? {};
-        playerHandsMap[p.id] = [{
-          cards, status, bet: b, doubled: false,
-          ...(Object.keys(betsOnThisPlayer).length > 0 && { boxing_bets: betsOnThisPlayer }),
-        }];
+        playerHandsMap[p.id] = [{ cards, status, bet: b, doubled: false }];
+      }
+
+      // Invert { boxerId: { targetId: amount } } → { targetId: { boxerId: amount } }
+      // so each hand knows who is boxing it and for how much
+      const perHandBoxing: Record<string, Record<string, number>> = {};
+      for (const [boxerId, targets] of Object.entries(newBoxingBets)) {
+        for (const [targetId, amount] of Object.entries(targets)) {
+          if (!(targetId in playerHandsMap)) continue;
+          if (!perHandBoxing[targetId]) perHandBoxing[targetId] = {};
+          perHandBoxing[targetId][boxerId] = amount;
+        }
+      }
+      for (const p of bettingPlayers) {
+        const betsOnHand = perHandBoxing[p.id] ?? {};
+        if (Object.keys(betsOnHand).length > 0)
+          playerHandsMap[p.id][0] = { ...playerHandsMap[p.id][0], boxing_bets: betsOnHand };
       }
 
       const { card: dc1, deck: d3 } = dealCard(deck); deck = d3;
@@ -517,11 +537,12 @@ export default function Game() {
         if (!(p.id in newChips)) newChips[p.id] = p.chips;
         newChips[p.id] -= newBets[p.id];
       }
-      // Deduct boxing bets from the boxers
-      for (const [targetId, boxers] of Object.entries(mergedBoxing)) {
-        if (!(targetId in playerHandsMap)) continue;
+      // Deduct boxing bets — floored at 0 to guard against any chip-count race
+      for (const [targetId, boxers] of Object.entries(perHandBoxing)) {
+        void targetId;
         for (const [boxerId, amount] of Object.entries(boxers)) {
-          if (boxerId in newChips) newChips[boxerId] -= amount;
+          if (boxerId in newChips)
+            newChips[boxerId] = Math.max(0, newChips[boxerId] - amount);
         }
       }
 
@@ -719,6 +740,17 @@ export default function Game() {
   async function handleCashout() {
     const chips = gameState?.player_chips[myPlayerId] ?? 0;
     await supabase.from('players').update({ is_active: false, chips }).eq('id', myPlayerId);
+
+    // Close the room if no non-dealer players remain, so it doesn't stay open forever
+    if (roomId) {
+      const pvpDealerId = gameState?.pvp_dealer_id ?? null;
+      const { data: remaining } = await supabase
+        .from('players').select('id').eq('room_id', roomId).eq('is_active', true);
+      const stillPlaying = (remaining ?? []).filter(p => p.id !== pvpDealerId);
+      if (stillPlaying.length === 0)
+        await supabase.from('rooms').update({ status: 'finished' }).eq('id', roomId);
+    }
+
     localStorage.removeItem('playerId');
     localStorage.removeItem('roomCode');
     navigate('/');
@@ -944,6 +976,18 @@ export default function Game() {
           ) : (
             <div className="bet-waiting-msg">
               <p>Bet placed: <strong style={{ color: '#f0d060' }}>{fmt(gameState.player_bets[myPlayerId])} chips</strong></p>
+              {(() => {
+                const myBoxingInState = (gameState.boxing_bets?.[myPlayerId] ?? {}) as Record<string, number>;
+                const entries = Object.entries(myBoxingInState).filter(([, amt]) => amt > 0);
+                if (entries.length === 0) return null;
+                return (
+                  <p style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.55)', margin: '0.2rem 0' }}>
+                    🥊 {entries.map(([tid, amt]) =>
+                      `${fmt(amt)} on ${players.find(p => p.id === tid)?.name ?? '?'}`
+                    ).join(' · ')}
+                  </p>
+                );
+              })()}
               <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.9rem' }}>Waiting for others…</p>
             </div>
           )}

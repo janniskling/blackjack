@@ -32,10 +32,10 @@ export function shuffleDeck(deck: Card[]): Card[] {
 }
 
 export function dealCard(deck: Card[]): { card: Card; deck: Card[] } {
-  const updated = [...deck];
-  const card = updated.shift();
-  if (!card) throw new Error('Deck is empty');
-  return { card, deck: updated };
+  // Safety net: if the 3-deck shoe is somehow exhausted, silently replenish
+  const source = deck.length > 0 ? [...deck] : createDeck();
+  const card = source.shift()!;
+  return { card, deck: source };
 }
 
 export function cardNumericValue(value: Value): number {
