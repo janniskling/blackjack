@@ -85,8 +85,7 @@ export default function Lobby() {
       const playerChips: Record<string, number> = {};
       for (const p of players) {
         if (p.id === pvpDealerId) continue; // Dealer has no chips in PvP mode
-        playerChips[p.id] = room.starting_chips;
-        await supabase.from('players').update({ chips: room.starting_chips }).eq('id', p.id);
+        playerChips[p.id] = p.chips; // Each player chose their own starting chips
       }
 
       const emptyHands = Object.fromEntries(
@@ -133,12 +132,9 @@ export default function Lobby() {
         <h1>Waiting Room</h1>
         <div className="room-code-display">{code}</div>
         <p className="lobby-subtitle">Share this code with friends</p>
-        {room.starting_chips > 0 && (
-          <p className="lobby-subtitle" style={{ marginTop: '0.25rem' }}>
-            Starting chips: <strong style={{ color: '#f0d060' }}>{room.starting_chips.toLocaleString()}</strong>
-            {' '}(€{room.starting_chips / 100})
-          </p>
-        )}
+        <p className="lobby-subtitle" style={{ marginTop: '0.25rem', color: 'rgba(255,255,255,0.45)' }}>
+          Each player uses their own starting chips
+        </p>
       </div>
 
       <div className="players-list">

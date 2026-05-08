@@ -7,12 +7,33 @@ function generateCode(): string {
   return Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
 }
 
+function ChipsInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="chips-input-row">
+      <label>Your starting chips</label>
+      <div className="euro-input">
+        <span className="euro-symbol">€</span>
+        <input
+          type="number"
+          min="1"
+          max="10000"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          style={{ paddingLeft: '1.5rem' }}
+        />
+      </div>
+      <span className="chips-preview">= {(parseInt(value) || 0) * 100} chips</span>
+    </div>
+  );
+}
+
 export default function Home() {
   const navigate = useNavigate();
 
   const [createName, setCreateName] = useState(localStorage.getItem('playerName') || '');
-  const [startingEuros, setStartingEuros] = useState('10');
+  const [createEuros, setCreateEuros] = useState('10');
   const [joinName, setJoinName] = useState(localStorage.getItem('playerName') || '');
+  const [joinEuros, setJoinEuros] = useState('10');
   const [joinCode, setJoinCode] = useState('');
   const [createError, setCreateError] = useState('');
   const [joinError, setJoinError] = useState('');
@@ -21,18 +42,18 @@ export default function Home() {
 
   async function handleCreate() {
     if (!createName.trim()) { setCreateError('Enter your name'); return; }
-    const euros = parseInt(startingEuros, 10);
+    const euros = parseInt(createEuros, 10);
     if (isNaN(euros) || euros < 1) { setCreateError('Enter a valid amount'); return; }
     setCreating(true);
     setCreateError('');
 
     try {
       const code = generateCode();
-      const startingChips = euros * 100;
+      const chips = euros * 100;
 
       const { data: room, error: roomErr } = await supabase
         .from('rooms')
-        .insert({ code, status: 'waiting', starting_chips: startingChips })
+        .insert({ code, status: 'waiting', starting_chips: 0 })
         .select()
         .single();
 
@@ -40,7 +61,7 @@ export default function Home() {
 
       const { data: player, error: playerErr } = await supabase
         .from('players')
-        .insert({ room_id: room.id, name: createName.trim(), is_active: true, chips: startingChips })
+        .insert({ room_id: room.id, name: createName.trim(), is_active: true, chips })
         .select()
         .single();
 
@@ -61,6 +82,8 @@ export default function Home() {
   async function handleJoin() {
     if (!joinName.trim()) { setJoinError('Enter your name'); return; }
     if (!joinCode.trim()) { setJoinError('Enter a room code'); return; }
+    const euros = parseInt(joinEuros, 10);
+    if (isNaN(euros) || euros < 1) { setJoinError('Enter a valid amount'); return; }
     setJoining(true);
     setJoinError('');
 
@@ -75,9 +98,11 @@ export default function Home() {
       if (roomErr || !room) { setJoinError('Room not found'); return; }
       if (room.status === 'finished') { setJoinError('This room is closed'); return; }
 
+      const chips = euros * 100;
+
       const { data: player, error: playerErr } = await supabase
         .from('players')
-        .insert({ room_id: room.id, name: joinName.trim(), is_active: true, chips: room.starting_chips })
+        .insert({ room_id: room.id, name: joinName.trim(), is_active: true, chips })
         .select()
         .single();
 
@@ -87,7 +112,6 @@ export default function Home() {
       localStorage.setItem('playerId', player.id);
       localStorage.setItem('roomCode', code);
 
-      // Go directly to game if already running, otherwise wait in lobby
       navigate(room.status === 'playing' ? `/game/${code}` : `/room/${code}`);
     } catch (e: unknown) {
       setJoinError((e as Error).message || 'Failed to join room');
@@ -108,21 +132,7 @@ export default function Home() {
             onChange={e => setCreateName(e.target.value)}
             maxLength={20}
           />
-          <div className="chips-input-row">
-            <label>Starting money</label>
-            <div className="euro-input">
-              <span className="euro-symbol">€</span>
-              <input
-                type="number"
-                min="1"
-                max="10000"
-                value={startingEuros}
-                onChange={e => setStartingEuros(e.target.value)}
-                style={{ paddingLeft: '1.5rem' }}
-              />
-            </div>
-            <span className="chips-preview">= {(parseInt(startingEuros) || 0) * 100} chips</span>
-          </div>
+          <ChipsInput value={createEuros} onChange={setCreateEuros} />
           {createError && <span className="error-msg">{createError}</span>}
           <button className="btn btn-primary" onClick={handleCreate} disabled={creating}>
             {creating ? 'Creating…' : 'Create Room'}
@@ -137,6 +147,7 @@ export default function Home() {
             onChange={e => setJoinName(e.target.value)}
             maxLength={20}
           />
+          <ChipsInput value={joinEuros} onChange={setJoinEuros} />
           <input
             placeholder="Room code (e.g. ABCD)"
             value={joinCode}
