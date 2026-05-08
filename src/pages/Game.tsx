@@ -13,6 +13,7 @@ import {
   runDealerLogic,
   determineWinner,
 } from '../lib/blackjack';
+import type { Card } from '../lib/blackjack';
 import CardComponent from '../components/CardComponent';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
@@ -30,8 +31,12 @@ export default function Game() {
   const [acting, setActing] = useState(false);
   const [betInput, setBetInput] = useState(100);
   const [easterEgg, setEasterEgg] = useState(false);
+  const [dealAnimStep, setDealAnimStep] = useState(Infinity);
+
   const dealerRanRef = useRef(false);
   const broadcastRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const prevPhaseRef = useRef<string | null>(null);
+  const dealAnimTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function triggerEasterEgg() {
     setEasterEgg(true);
@@ -83,9 +88,44 @@ export default function Game() {
     };
   }, [roomId]);
 
-  // ── Auto-run dealer phase ───────────────────────────────────────────────────
+  // ── Deal animation: trigger when phase changes betting → player_turns ───────
   useEffect(() => {
-    if (gameState?.phase !== 'dealer_turn' || dealerRanRef.current) return;
+    if (!gameState) return;
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = gameState.phase;
+
+    if (prev === 'betting' && gameState.phase === 'player_turns') {
+      const uniquePlayerIds = [...new Set(gameState.play_order.map(e => e.player_id))];
+      const totalCards = (uniquePlayerIds.length + 1) * 2; // players + dealer, 2 rounds
+      setDealAnimStep(0);
+
+      if (dealAnimTimerRef.current) clearInterval(dealAnimTimerRef.current);
+      let step = 0;
+      dealAnimTimerRef.current = setInterval(() => {
+        step++;
+        if (step >= totalCards) {
+          setDealAnimStep(Infinity);
+          clearInterval(dealAnimTimerRef.current!);
+          dealAnimTimerRef.current = null;
+        } else {
+          setDealAnimStep(step);
+        }
+      }, 350);
+    }
+
+    return () => {
+      if (dealAnimTimerRef.current) {
+        clearInterval(dealAnimTimerRef.current);
+        dealAnimTimerRef.current = null;
+      }
+    };
+  }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-run dealer phase (normal / non-PvP mode only) ─────────────────────
+  useEffect(() => {
+    if (!gameState) return;
+    if (gameState.pvp_dealer_id) return; // PvP: dealer plays manually
+    if (gameState.phase !== 'dealer_turn' || dealerRanRef.current) return;
     dealerRanRef.current = true;
 
     const gs = gameState;
@@ -106,7 +146,6 @@ export default function Game() {
           } else {
             result = determineWinner(hand.cards, finalHand);
           }
-          // Payout: blackjack pays 3:2
           if (result === 'win') {
             newChips[pid] += hand.status === 'blackjack'
               ? Math.floor(hand.bet * 2.5)
@@ -128,7 +167,6 @@ export default function Game() {
       }).eq('room_id', roomId).eq('phase', 'dealer_turn');
 
       if (!error) {
-        // Persist chips to players table
         for (const [pid, chips] of Object.entries(newChips)) {
           await supabase.from('players').update({ chips }).eq('id', pid);
         }
@@ -136,10 +174,89 @@ export default function Game() {
     })();
   }, [gameState?.phase, roomId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── PvP: auto-finish if dealer enters turn already at 17+ ──────────────────
+  useEffect(() => {
+    if (!gameState) return;
+    if (!gameState.pvp_dealer_id || myPlayerId !== gameState.pvp_dealer_id) return;
+    if (gameState.phase !== 'dealer_turn' || dealerRanRef.current) return;
+
+    const fullHand = gameState.dealer_hand.map(c => ({ ...c, faceDown: false }));
+    if (calculateHand(fullHand) >= 17) {
+      dealerRanRef.current = true;
+      runPvpPayouts(gameState, fullHand, gameState.deck);
+    }
+  }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── PvP: calculate payouts and finish round ─────────────────────────────────
+  async function runPvpPayouts(gs: GameState, finalDealerHand: Card[], finalDeck: Card[]) {
+    const dealerBJ = isBlackjack(finalDealerHand);
+    const newHands: Record<string, PlayerHand[]> = {};
+    const newChips = { ...gs.player_chips };
+
+    for (const [pid, hands] of Object.entries(gs.player_hands)) {
+      newHands[pid] = hands.map(hand => {
+        let result: 'win' | 'lose' | 'push';
+        if (hand.status === 'bust') {
+          result = 'lose';
+        } else if (hand.status === 'blackjack') {
+          result = dealerBJ ? 'push' : 'win';
+        } else {
+          result = determineWinner(hand.cards, finalDealerHand);
+        }
+        if (result === 'win') {
+          newChips[pid] += hand.status === 'blackjack'
+            ? Math.floor(hand.bet * 2.5)
+            : hand.bet * 2;
+        } else if (result === 'push') {
+          newChips[pid] += hand.bet;
+        }
+        return { ...hand, result };
+      });
+    }
+
+    const { error } = await supabase.from('game_state').update({
+      dealer_hand: finalDealerHand,
+      deck: finalDeck,
+      player_hands: newHands,
+      player_chips: newChips,
+      phase: 'finished',
+      updated_at: new Date().toISOString(),
+    }).eq('room_id', roomId).eq('phase', 'dealer_turn');
+
+    if (!error) {
+      for (const [pid, chips] of Object.entries(newChips)) {
+        await supabase.from('players').update({ chips }).eq('id', pid);
+      }
+    }
+  }
+
+  // ── PvP: dealer hits a card ─────────────────────────────────────────────────
+  async function handlePvpDealerHit() {
+    if (!gameState || acting) return;
+    setActing(true);
+    try {
+      const { card, deck } = dealCard(gameState.deck);
+      const newHand = gameState.dealer_hand.map(c => ({ ...c, faceDown: false }));
+      newHand.push({ ...card, faceDown: false });
+
+      if (calculateHand(newHand) >= 17) {
+        await runPvpPayouts(gameState, newHand, deck);
+      } else {
+        await supabase.from('game_state').update({
+          dealer_hand: newHand,
+          deck,
+          updated_at: new Date().toISOString(),
+        }).eq('room_id', roomId);
+      }
+    } finally {
+      setActing(false);
+    }
+  }
+
   // ── Advance turn helper ─────────────────────────────────────────────────────
   async function advanceTurn(
     updatedHands: Record<string, PlayerHand[]>,
-    updatedDeck: import('../lib/blackjack').Card[],
+    updatedDeck: Card[],
     playOrder: PlayOrderEntry[],
     currentIdx: number,
     updatedChips?: Record<string, number>
@@ -180,9 +297,14 @@ export default function Game() {
     }
 
     try {
+      const pvpDealerId = gameState.pvp_dealer_id ?? null;
       const newBets = { ...gameState.player_bets, [myPlayerId]: bet };
-      const activePlayers = players.filter(p => (gameState.player_chips[p.id] ?? 0) > 0);
-      const allBet = activePlayers.every(p => newBets[p.id] !== undefined);
+      const allActivePlayers = players.filter(p => (gameState.player_chips[p.id] ?? 0) > 0);
+      // In PvP mode the dealer doesn't bet
+      const bettingPlayers = pvpDealerId
+        ? allActivePlayers.filter(p => p.id !== pvpDealerId)
+        : allActivePlayers;
+      const allBet = bettingPlayers.length > 0 && bettingPlayers.every(p => newBets[p.id] !== undefined);
 
       if (!allBet) {
         await supabase.from('game_state').update({
@@ -196,7 +318,7 @@ export default function Game() {
       let deck = createDeck();
       const playerHandsMap: Record<string, PlayerHand[]> = {};
 
-      for (const p of activePlayers) {
+      for (const p of bettingPlayers) {
         const b = newBets[p.id];
         const { card: c1, deck: d1 } = dealCard(deck); deck = d1;
         const { card: c2, deck: d2 } = dealCard(deck); deck = d2;
@@ -204,25 +326,20 @@ export default function Game() {
         const status = isBlackjack(cards) ? 'blackjack' : 'playing';
         playerHandsMap[p.id] = [{ cards, status, bet: b, doubled: false }];
       }
-      // Players with 0 chips get empty hand array (skipped)
-      for (const p of players) {
-        if (!playerHandsMap[p.id]) playerHandsMap[p.id] = [];
-      }
 
       const { card: dc1, deck: d3 } = dealCard(deck); deck = d3;
       const { card: dc2, deck: d4 } = dealCard(deck); deck = d4;
       const dealerHand = [dc1, { ...dc2, faceDown: true }];
 
       const playOrder: PlayOrderEntry[] = [];
-      for (const p of activePlayers) {
+      for (const p of bettingPlayers) {
         if (playerHandsMap[p.id][0]?.status === 'playing') {
           playOrder.push({ player_id: p.id, hand_index: 0 });
         }
       }
 
       const newChips = { ...gameState.player_chips };
-      for (const p of activePlayers) {
-        // Initialize chips from DB for mid-game joiners not yet in player_chips
+      for (const p of bettingPlayers) {
         if (!(p.id in newChips)) newChips[p.id] = p.chips;
         newChips[p.id] -= newBets[p.id];
       }
@@ -357,7 +474,6 @@ export default function Game() {
       newPlayerHands[player_id] = playerHandArr;
       const newHandIndex = playerHandArr.length - 1;
 
-      // Insert second hand into play_order right after current
       const newPlayOrder: PlayOrderEntry[] = [
         ...gameState.play_order.slice(0, gameState.current_player_index + 1),
         { player_id, hand_index: newHandIndex },
@@ -367,11 +483,8 @@ export default function Game() {
       const newChips = { ...gameState.player_chips };
       newChips[player_id] -= hand.bet;
 
-      // If first split hand is blackjack, skip to second
       let nextPlayIdx = gameState.current_player_index;
-      if (hand1.status === 'blackjack') {
-        nextPlayIdx += 1;
-      }
+      if (hand1.status === 'blackjack') nextPlayIdx += 1;
 
       await supabase.from('game_state').update({
         deck,
@@ -389,16 +502,16 @@ export default function Game() {
   // ── Next round ──────────────────────────────────────────────────────────────
   async function handleNextRound() {
     if (!gameState) return;
-    const chips = gameState.player_chips;
+    const chips = { ...gameState.player_chips };
+    const pvpDealerId = gameState.pvp_dealer_id ?? null;
 
-    // Deactivate players with 0 chips (use DB chips as fallback for new joiners)
     for (const p of players) {
+      if (p.id === pvpDealerId) continue; // Dealer has no chips
       if ((chips[p.id] ?? p.chips) <= 0) {
         await supabase.from('players').update({ is_active: false }).eq('id', p.id);
       }
     }
 
-    // Re-fetch active players fresh from DB (includes new mid-game joiners)
     const { data: activePlayers } = await supabase
       .from('players')
       .select()
@@ -408,12 +521,19 @@ export default function Game() {
 
     const remaining = (activePlayers ?? []) as Player[];
 
-    // Add chips for players who joined mid-game and aren't in player_chips yet
     for (const p of remaining) {
+      if (p.id === pvpDealerId) continue;
       if (!(p.id in chips)) chips[p.id] = p.chips;
     }
 
-    const emptyHands = Object.fromEntries(remaining.map(p => [p.id, []]));
+    // Dealer is excluded from chips tracking
+    if (pvpDealerId) delete chips[pvpDealerId];
+
+    const emptyHands = Object.fromEntries(
+      remaining
+        .filter(p => p.id !== pvpDealerId)
+        .map(p => [p.id, []])
+    );
 
     await supabase.from('game_state').update({
       deck: [],
@@ -444,10 +564,26 @@ export default function Game() {
     return <div className="game-table"><p style={{ textAlign: 'center', marginTop: '4rem' }}>Loading…</p></div>;
   }
 
+  const pvpDealerId = gameState.pvp_dealer_id ?? null;
+  const isPvpMode = pvpDealerId !== null;
+  const isDealer = isPvpMode && myPlayerId === pvpDealerId;
+  const pvpDealerPlayer = isPvpMode ? players.find(p => p.id === pvpDealerId) : null;
+
+  // Compute deal order for animation
+  const dealOrderIds = [...new Set(gameState.play_order.map(e => e.player_id))];
+  const numBettingPlayers = dealOrderIds.length;
+
+  function isCardVisible(targetType: 'player' | 'dealer', playerId: string, cardIndex: number): boolean {
+    if (dealAnimStep === Infinity) return true;
+    const pi = targetType === 'dealer' ? numBettingPlayers : dealOrderIds.indexOf(playerId);
+    if (pi < 0) return true; // player not in deal order (spectator/late joiner)
+    const globalStep = cardIndex * (numBettingPlayers + 1) + pi;
+    return globalStep < dealAnimStep;
+  }
+
   const currentEntry = gameState.play_order[gameState.current_player_index];
   const isMyTurn = currentEntry?.player_id === myPlayerId && gameState.phase === 'player_turns';
   const myPlayer = players.find(p => p.id === myPlayerId);
-  // New mid-game joiners aren't in player_chips yet — fall back to their DB chips
   const myChips = gameState.player_chips[myPlayerId] ?? myPlayer?.chips ?? 0;
   const myHasBet = myPlayerId in gameState.player_bets;
   const currentHand = currentEntry
@@ -457,16 +593,59 @@ export default function Game() {
   const canDouble = isMyTurn && currentHand?.cards.length === 2 && myChips >= (currentHand?.bet ?? 0) && [9, 10, 11].includes(currentHandValue);
   const canSplitHand = isMyTurn && currentHand !== null && currentHand !== undefined && canSplit(currentHand.cards) && myChips >= (currentHand?.bet ?? 0);
 
-  const dealerVisibleCards = gameState.phase === 'player_turns'
+  // Dealer hand rendering: PvP dealer sees their own face-down card
+  const dealerHandForDisplay: Card[] = gameState.dealer_hand.map(c => {
+    if (!c.faceDown) return c;
+    if (isDealer) return { ...c, faceDown: false }; // dealer sees own hole card
+    if (gameState.phase === 'dealer_turn' || gameState.phase === 'finished') return { ...c, faceDown: false };
+    return c;
+  });
+
+  const dealerVisibleCards = gameState.phase === 'player_turns' && !isDealer
     ? gameState.dealer_hand.filter(c => !c.faceDown)
-    : gameState.dealer_hand;
-  const dealerValue = calculateHand(dealerVisibleCards);
-  const dealerBust = gameState.phase === 'finished' && calculateHand(gameState.dealer_hand) > 21;
+    : dealerHandForDisplay;
+  const dealerDisplayValue = calculateHand(dealerVisibleCards);
+  const dealerFullValue = calculateHand(dealerHandForDisplay);
+  const dealerBust = gameState.phase === 'finished' && dealerFullValue > 21;
+
+  const isPvpDealerTurn = isPvpMode && gameState.phase === 'dealer_turn';
+  const pvpDealerHandValue = calculateHand(dealerHandForDisplay);
+  const pvpDealerMustHit = isPvpDealerTurn && pvpDealerHandValue < 17;
 
   // ── Betting phase ────────────────────────────────────────────────────────────
   if (gameState.phase === 'betting') {
-    // Fall back to DB chips for players who joined mid-game and aren't in player_chips yet
-    const activePlayers = players.filter(p => (gameState.player_chips[p.id] ?? p.chips) > 0);
+    const allActivePlayers = players.filter(p => (gameState.player_chips[p.id] ?? p.chips) > 0);
+    const bettingActivePlayers = isPvpMode
+      ? allActivePlayers.filter(p => p.id !== pvpDealerId)
+      : allActivePlayers;
+
+    // PvP dealer sees a waiting screen
+    if (isDealer) {
+      return (
+        <div className="game-table">
+          <div className="betting-area">
+            <h2 className="betting-title">You are the Dealer</h2>
+            <div className="room-code-small">Room: <span>{code}</span></div>
+            <div className="dealer-waiting-badge">🃏 Waiting for players to place their bets…</div>
+            <div className="players-bets-list">
+              {bettingActivePlayers.map(p => {
+                const pBet = gameState.player_bets[p.id];
+                const pChips = gameState.player_chips[p.id] ?? 0;
+                return (
+                  <div key={p.id} className={`bet-player-row${pBet !== undefined ? ' bet-placed' : ''}`}>
+                    <span className="bet-player-name">{p.name}</span>
+                    <span className="chips-display">🪙 {fmt(pChips)}</span>
+                    {pBet !== undefined
+                      ? <span className="bet-amount-badge">Bet: {fmt(pBet)}</span>
+                      : <span className="bet-waiting">thinking…</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     if (myChips <= 0) {
       return (
@@ -486,7 +665,7 @@ export default function Game() {
           <div className="room-code-small">Room: <span>{code}</span></div>
 
           <div className="players-bets-list">
-            {activePlayers.map(p => {
+            {bettingActivePlayers.map(p => {
               const pBet = gameState.player_bets[p.id];
               const pChips = gameState.player_chips[p.id] ?? 0;
               return (
@@ -499,6 +678,12 @@ export default function Game() {
                 </div>
               );
             })}
+            {isPvpMode && (
+              <div className="bet-player-row">
+                <span className="bet-player-name">{pvpDealerPlayer?.name ?? 'Dealer'}</span>
+                <span className="dealer-role-badge">🃏 Dealer</span>
+              </div>
+            )}
           </div>
 
           {!myHasBet ? (
@@ -556,23 +741,42 @@ export default function Game() {
   }
 
   // ── Game table ───────────────────────────────────────────────────────────────
+  const dealerLabel = isPvpMode
+    ? `${pvpDealerPlayer?.name ?? 'Dealer'} — Dealer`
+    : 'Dealer';
+
   return (
     <div className="game-table">
-      {/* Dealer */}
-      <div className="dealer-area">
-        <h3>Dealer</h3>
+      {/* Dealer area */}
+      <div className={`dealer-area${isPvpDealerTurn && isDealer ? ' dealer-area-active' : ''}`}>
+        <h3>{dealerLabel}</h3>
         <div className="cards-row">
-          {gameState.dealer_hand.map((card, i) => <CardComponent key={i} card={card} />)}
+          {dealerHandForDisplay.map((card, i) => (
+            <CardComponent
+              key={i}
+              card={isCardVisible('dealer', '', i) ? card : { ...card, faceDown: true }}
+            />
+          ))}
         </div>
         <div className={`hand-value${dealerBust ? ' bust' : ''}`}>
-          {gameState.phase === 'player_turns' ? dealerValue : calculateHand(gameState.dealer_hand) > 21 ? 'BUST' : calculateHand(gameState.dealer_hand)}
+          {gameState.phase === 'player_turns'
+            ? dealerDisplayValue
+            : dealerBust ? 'BUST' : dealerFullValue}
         </div>
+        {isDealer && gameState.phase === 'player_turns' && (
+          <div className="dealer-peek-hint">Only you can see your face-down card</div>
+        )}
       </div>
 
-      {gameState.phase === 'dealer_turn' && <div className="phase-banner">Dealer's Turn…</div>}
+      {/* Phase banners */}
+      {gameState.phase === 'dealer_turn' && !isPvpMode && (
+        <div className="phase-banner">Dealer's Turn…</div>
+      )}
+      {isPvpDealerTurn && !isDealer && (
+        <div className="phase-banner">{pvpDealerPlayer?.name ?? 'Dealer'}'s Turn…</div>
+      )}
       {gameState.phase === 'finished' && <div className="phase-banner">Round Over!</div>}
-      {/* Spectator notice for mid-game joiners */}
-      {gameState.phase !== 'finished' && !(myPlayerId in gameState.player_hands) && myPlayerId && (
+      {gameState.phase !== 'finished' && !(myPlayerId in gameState.player_hands) && myPlayerId && !isDealer && (
         <div className="phase-banner" style={{ background: 'rgba(240,208,96,0.12)', color: '#f0d060' }}>
           You're joining next round — watching for now 👀
         </div>
@@ -581,6 +785,7 @@ export default function Game() {
       {/* Players */}
       <div className="players-row">
         {players.map(player => {
+          if (player.id === pvpDealerId) return null; // Dealer shown in dealer-area
           const allHands = gameState.player_hands[player.id] ?? [];
           if (allHands.length === 0) return null;
           return (
@@ -609,7 +814,12 @@ export default function Game() {
                     <div key={hIdx} className={areaClass}>
                       {allHands.length > 1 && <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.5)' }}>Hand {hIdx + 1}</span>}
                       <div className="cards-row">
-                        {hand.cards.map((card, i) => <CardComponent key={i} card={card} />)}
+                        {hand.cards.map((card, i) => (
+                          <CardComponent
+                            key={i}
+                            card={isCardVisible('player', player.id, i) ? card : { ...card, faceDown: true }}
+                          />
+                        ))}
                       </div>
                       <div className={hvClass}>{handVal}</div>
                       <span className={`player-status-badge status-${hand.status}`}>
@@ -632,7 +842,7 @@ export default function Game() {
         })}
       </div>
 
-      {/* Action bar */}
+      {/* Player action bar */}
       {isMyTurn && (
         <div className="action-bar">
           <button className="btn btn-primary" onClick={handleHit} disabled={acting}>HIT</button>
@@ -651,11 +861,30 @@ export default function Game() {
       {!isMyTurn && gameState.phase === 'player_turns' && currentEntry && (
         <div className="phase-banner">
           Waiting for {players.find(p => p.id === currentEntry.player_id)?.name ?? '…'}
-          {gameState.play_order[gameState.current_player_index]?.hand_index !== undefined &&
-           (gameState.player_hands[currentEntry.player_id]?.length ?? 0) > 1
+          {(gameState.player_hands[currentEntry.player_id]?.length ?? 0) > 1
             ? ` (Hand ${gameState.play_order[gameState.current_player_index].hand_index + 1})`
             : ''}
           …
+        </div>
+      )}
+
+      {/* PvP Dealer action bar */}
+      {isPvpDealerTurn && isDealer && (
+        <div className="action-bar">
+          {pvpDealerMustHit ? (
+            <>
+              <button className="btn btn-primary" onClick={handlePvpDealerHit} disabled={acting}>
+                HIT
+              </button>
+              <button className="btn btn-secondary" disabled style={{ opacity: 0.3 }}>
+                STAND (min. 17)
+              </button>
+            </>
+          ) : (
+            <div style={{ color: '#f0d060', fontWeight: 700, fontSize: '1rem' }}>
+              {pvpDealerHandValue} — Standing automatically…
+            </div>
+          )}
         </div>
       )}
 
@@ -663,9 +892,11 @@ export default function Game() {
         <div className="action-bar" style={{ flexDirection: 'column', gap: '0.5rem' }}>
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
             <button className="btn btn-success" onClick={handleNextRound}>Next Round</button>
-            <button className="btn btn-danger" onClick={handleCashout}>
-              Cashout (🪙 {fmt(myChips)})
-            </button>
+            {!isDealer && (
+              <button className="btn btn-danger" onClick={handleCashout}>
+                Cashout (🪙 {fmt(myChips)})
+              </button>
+            )}
           </div>
         </div>
       )}

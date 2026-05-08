@@ -51,5 +51,6 @@ export type GameState = {
   phase: 'betting' | 'player_turns' | 'dealer_turn' | 'finished';
   player_bets: Record<string, number>;
   player_chips: Record<string, number>;
+  pvp_dealer_id?: string | null;
   updated_at: string;
 };

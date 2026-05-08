@@ -13,8 +13,17 @@ export default function Lobby() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [error, setError] = useState('');
   const [starting, setStarting] = useState(false);
+  const [pvpMode, setPvpMode] = useState(false);
+  const [selectedDealerId, setSelectedDealerId] = useState('');
 
   const myPlayerId = localStorage.getItem('playerId');
+
+  // Auto-select first player as dealer when PvP mode activates
+  useEffect(() => {
+    if (pvpMode && !selectedDealerId && players.length > 0) {
+      setSelectedDealerId(players[0].id);
+    }
+  }, [pvpMode, players, selectedDealerId]);
 
   useEffect(() => {
     if (!code) return;
@@ -42,7 +51,6 @@ export default function Lobby() {
           .then(({ data: p }) => {
             if (!p) return;
             setPlayers(p as Player[]);
-            // If current player is no longer active (cashed out), redirect home
             const myId = localStorage.getItem('playerId');
             if (myId && !p.some(pl => pl.id === myId)) {
               localStorage.removeItem('playerId');
@@ -72,25 +80,32 @@ export default function Lobby() {
     setStarting(true);
 
     try {
-      // Initialize chips for all players from room.starting_chips
+      const pvpDealerId = pvpMode && selectedDealerId ? selectedDealerId : null;
+
       const playerChips: Record<string, number> = {};
       for (const p of players) {
+        if (p.id === pvpDealerId) continue; // Dealer has no chips in PvP mode
         playerChips[p.id] = room.starting_chips;
-        // Sync to players table too
         await supabase.from('players').update({ chips: room.starting_chips }).eq('id', p.id);
       }
 
-      // Start in betting phase — no dealing yet
+      const emptyHands = Object.fromEntries(
+        players
+          .filter(p => p.id !== pvpDealerId)
+          .map(p => [p.id, []])
+      );
+
       await supabase.from('game_state').upsert({
         room_id: room.id,
         deck: [],
         dealer_hand: [],
-        player_hands: Object.fromEntries(players.map(p => [p.id, []])),
+        player_hands: emptyHands,
         play_order: [],
         current_player_index: 0,
         phase: 'betting',
         player_bets: {},
         player_chips: playerChips,
+        pvp_dealer_id: pvpDealerId,
         updated_at: new Date().toISOString(),
       });
 
@@ -133,12 +148,45 @@ export default function Lobby() {
             <div className="player-dot" />
             <span>{p.name}</span>
             {p.id === myPlayerId && <span className="you-badge">You</span>}
+            {pvpMode && p.id === selectedDealerId && (
+              <span className="dealer-badge">🃏 Dealer</span>
+            )}
           </div>
         ))}
         {players.length === 0 && (
           <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: '0.9rem' }}>Waiting for players…</p>
         )}
       </div>
+
+      {/* PvP Mode Toggle */}
+      {players.length >= 2 && (
+        <div className="pvp-mode-section">
+          <label className="pvp-toggle-label">
+            <input
+              type="checkbox"
+              checked={pvpMode}
+              onChange={e => setPvpMode(e.target.checked)}
+              className="pvp-checkbox"
+            />
+            <span>PvP Mode — one player is the Dealer</span>
+          </label>
+
+          {pvpMode && (
+            <div className="dealer-select-row">
+              <label style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.6)' }}>Select Dealer:</label>
+              <select
+                value={selectedDealerId}
+                onChange={e => setSelectedDealerId(e.target.value)}
+                className="dealer-select"
+              >
+                {players.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      )}
 
       {players.length >= 2 ? (
         <button className="btn btn-primary" onClick={handleStartGame} disabled={starting}>
