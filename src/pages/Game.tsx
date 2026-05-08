@@ -56,9 +56,9 @@ function FlyingCardEl({
       width: 54,
       height: 78,
       borderRadius: 7,
-      background: 'linear-gradient(135deg, #1a3a8f 0%, #0d2060 100%)',
-      border: '1px solid rgba(255,255,255,0.25)',
-      boxShadow: '0 6px 24px rgba(0,0,0,0.7)',
+      background: '#fff',
+      border: '1px solid rgba(0,0,0,0.12)',
+      boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
       zIndex: 999,
       pointerEvents: 'none',
       opacity: flying ? 1 : 0,
@@ -737,12 +737,11 @@ export default function Game() {
       >
         <h3>{isPvpMode ? `${pvpDealerPlayer?.name ?? 'Dealer'} — Dealer` : 'Dealer'}</h3>
         <div className="cards-row">
-          {dealerHandForDisplay.map((card, i) => (
-            <CardComponent
-              key={i}
-              card={isCardVisible(`dealer_${i}`) ? card : { ...card, faceDown: true }}
-            />
-          ))}
+          {dealerHandForDisplay.map((card, i) =>
+            isCardVisible(`dealer_${i}`)
+              ? <CardComponent key={i} card={card} />
+              : null
+          )}
         </div>
         <div className={`hand-value${dealerBust ? ' bust' : ''}`}>
           {gameState.phase === 'player_turns' ? dealerDisplayValue : dealerBust ? 'BUST' : dealerFullValue}
@@ -810,12 +809,11 @@ export default function Game() {
                     <div key={hIdx} className={areaClass}>
                       {allHands.length > 1 && <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.5)' }}>Hand {hIdx + 1}</span>}
                       <div className="cards-row">
-                        {hand.cards.map((card, i) => (
-                          <CardComponent
-                            key={i}
-                            card={isCardVisible(`${player.id}_${i}`) ? card : { ...card, faceDown: true }}
-                          />
-                        ))}
+                        {hand.cards.map((card, i) =>
+                          isCardVisible(`${player.id}_${i}`)
+                            ? <CardComponent key={i} card={card} />
+                            : null
+                        )}
                       </div>
                       <div className={hvClass}>{handVal}</div>
                       <span className={`player-status-badge status-${hand.status}`}>
