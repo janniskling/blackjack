@@ -450,8 +450,8 @@ export default function Game() {
   // ── Betting ─────────────────────────────────────────────────────────────────
   async function handlePlaceBet() {
     if (!gameState || acting) return;
-    const myChips = gameState.player_chips[myPlayerId] ?? 0;
-    const bet = Math.max(1, Math.min(betInput, myChips));
+    const myChips = gameState.player_chips[myPlayerId] ?? players.find(p => p.id === myPlayerId)?.chips ?? 0;
+    const bet = Math.min(betInput, myChips); // allow 0 for boxing-only bets
     setActing(true);
 
     if (bet === 400) {
@@ -462,7 +462,8 @@ export default function Game() {
     try {
       const pvpDealerId    = gameState.pvp_dealer_id ?? null;
       const newBets        = { ...gameState.player_bets, [myPlayerId]: bet };
-      const allActive      = players.filter(p => (gameState.player_chips[p.id] ?? 0) > 0);
+      // Use p.chips as fallback so players who joined during betting are included
+      const allActive      = players.filter(p => (gameState.player_chips[p.id] ?? p.chips) > 0);
       const bettingPlayers = pvpDealerId ? allActive.filter(p => p.id !== pvpDealerId) : allActive;
       const allBet         = bettingPlayers.length > 0 && bettingPlayers.every(p => newBets[p.id] !== undefined);
 
@@ -870,10 +871,10 @@ export default function Game() {
                 <button className="btn btn-secondary" onClick={() => setBetInput(myChips)}>All in</button>
               </div>
               <div className="bet-slider-row">
-                <input type="range" min={1} max={myChips} value={Math.min(betInput, myChips)}
+                <input type="range" min={0} max={myChips} value={Math.min(betInput, myChips)}
                   onChange={e => setBetInput(Number(e.target.value))} className="bet-slider" />
-                <input type="number" min={1} max={myChips} value={Math.min(betInput, myChips)}
-                  onChange={e => setBetInput(Math.max(1, Math.min(Number(e.target.value), myChips)))}
+                <input type="number" min={0} max={myChips} value={Math.min(betInput, myChips)}
+                  onChange={e => setBetInput(Math.max(0, Math.min(Number(e.target.value) || 0, myChips)))}
                   className="bet-number-input" />
               </div>
 
@@ -927,12 +928,15 @@ export default function Game() {
                 const ownBet      = Math.min(betInput, myChips);
                 const totalBoxing = Object.values(myBoxingBets).reduce((a, b) => a + b, 0);
                 const overBudget  = ownBet + totalBoxing > myChips;
-                const label       = totalBoxing > 0
-                  ? `Place Bet — ${fmt(ownBet)} + 🥊${fmt(totalBoxing)} chips`
-                  : `Place Bet — ${fmt(ownBet)} chips`;
+                const noBet       = ownBet === 0 && totalBoxing === 0;
+                const label = overBudget  ? 'Reduce your bets first'
+                  : ownBet === 0 && totalBoxing > 0 ? `Place 🥊 ${fmt(totalBoxing)} Boxing chips`
+                  : totalBoxing > 0        ? `Place Bet — ${fmt(ownBet)} + 🥊${fmt(totalBoxing)} chips`
+                  : ownBet > 0             ? `Place Bet — ${fmt(ownBet)} chips`
+                  : 'Set a bet first';
                 return (
-                  <button className="btn btn-primary" onClick={handlePlaceBet} disabled={acting || overBudget}>
-                    {overBudget ? 'Reduce your bets first' : label}
+                  <button className="btn btn-primary" onClick={handlePlaceBet} disabled={acting || overBudget || noBet}>
+                    {label}
                   </button>
                 );
               })()}
