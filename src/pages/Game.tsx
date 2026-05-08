@@ -19,57 +19,105 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 
 function fmt(n: number) { return n.toLocaleString(); }
 
-// ── Flying card animation element ───────────────────────────────────────────
-interface FlyingCardData {
-  id: string;
-  startX: number; startY: number;
-  endX: number;   endY: number;
-  delay: number;
-  cardKey: string;
+// ── Card DOM helpers (used by the Web Animations API animation) ──────────────
+const SUIT_SYMBOLS: Record<string, string> = { hearts:'♥', diamonds:'♦', clubs:'♣', spades:'♠' };
+const RED_SUITS = new Set(['hearts', 'diamonds']);
+
+function makeCardBack(): HTMLElement {
+  const el = document.createElement('div');
+  el.style.cssText =
+    'position:absolute;inset:0;border-radius:7px;background:#fff;' +
+    'border:1px solid rgba(0,0,0,0.12);overflow:hidden;' +
+    'backface-visibility:hidden;-webkit-backface-visibility:hidden;';
+  const pat = document.createElement('div');
+  pat.style.cssText =
+    'position:absolute;inset:3px;border-radius:4px;' +
+    'background:repeating-linear-gradient(45deg,' +
+    'rgba(0,0,0,0.07) 0px,rgba(0,0,0,0.07) 3px,transparent 3px,transparent 9px);';
+  el.appendChild(pat);
+  return el;
 }
 
-function FlyingCardEl({
-  startX, startY, endX, endY, delay, onLand,
-}: { startX: number; startY: number; endX: number; endY: number; delay: number; onLand: () => void }) {
-  const [flying, setFlying] = useState(false);
-  const [gone, setGone]     = useState(false);
+function makeCardFront(card: Card): HTMLElement {
+  const el   = document.createElement('div');
+  const isRed = RED_SUITS.has(card.suit);
+  const sym   = SUIT_SYMBOLS[card.suit] ?? '';
+  el.style.cssText =
+    'position:absolute;inset:0;border-radius:7px;background:#fff;' +
+    'border:1px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;' +
+    'justify-content:space-between;padding:4px 5px;box-sizing:border-box;' +
+    `color:${isRed ? '#c0392b' : '#1a1a1a'};` +
+    'font-family:Segoe UI,system-ui,sans-serif;font-size:0.8rem;font-weight:700;' +
+    'backface-visibility:hidden;-webkit-backface-visibility:hidden;' +
+    'transform:rotateY(180deg);'; // pre-rotated so it's hidden at start
+  el.innerHTML =
+    `<div style="display:flex;flex-direction:column;line-height:1.1">` +
+      `<span>${card.value}</span><span style="font-size:0.7rem">${sym}</span>` +
+    `</div>` +
+    `<div style="display:flex;flex-direction:column;line-height:1.1;transform:rotate(180deg)">` +
+      `<span>${card.value}</span><span style="font-size:0.7rem">${sym}</span>` +
+    `</div>`;
+  return el;
+}
 
-  useEffect(() => {
-    const t = setTimeout(() => {
-      setFlying(true);
-      setTimeout(() => { setGone(true); onLand(); }, 420);
-    }, delay);
-    return () => clearTimeout(t);
-  }, []); // eslint-disable-line
+/**
+ * Animate a card flying from (srcX,srcY) to (dstX,dstY) using the Web
+ * Animations API.  Calls onLand when the animation finishes and removes
+ * the temporary DOM element.  Returns a cancel function.
+ */
+function animateCard(
+  srcX: number, srcY: number,
+  dstX: number, dstY: number,
+  card: Card,
+  landFaceDown: boolean,
+  onLand: () => void,
+): () => void {
+  const dx   = dstX - srcX;
+  const dy   = dstY - srcY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const arcH = Math.max(60, dist * 0.32);          // arc peak height
+  const tilt = Math.random() * 16 - 8;             // final landing tilt −8°…+8°
 
-  if (gone) return null;
+  const arcDur    = 460;   // ms — total flight time
+  const flipDelay = arcDur * 0.62; // ms into flight when flip starts
+  const flipDur   = 210;   // ms — flip duration
+  const cleanupMs = arcDur + flipDur * 0.6 + 30;  // safe total wait
 
-  const dx = endX - startX;
-  const dy = endY - startY;
-  const rot = dx > 0 ? 6 : dx < -20 ? -6 : 0; // slight rotation based on direction
+  // ── Wrapper: fixed at source, carries translation + z-tilt ─────────────────
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText =
+    `position:fixed;left:${srcX}px;top:${srcY}px;width:54px;height:78px;` +
+    'z-index:999;pointer-events:none;perspective:600px;' +
+    'box-shadow:0 8px 24px rgba(0,0,0,0.45);border-radius:7px;';
 
-  return (
-    <div style={{
-      position: 'fixed',
-      left: startX,
-      top:  startY,
-      width: 54,
-      height: 78,
-      borderRadius: 7,
-      background: '#fff',
-      border: '1px solid rgba(0,0,0,0.12)',
-      boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
-      zIndex: 999,
-      pointerEvents: 'none',
-      opacity: flying ? 1 : 0,
-      transform: flying
-        ? `translate(${dx}px, ${dy}px) rotate(${rot}deg)`
-        : 'translate(0,0) rotate(0deg)',
-      transition: flying
-        ? 'transform 0.42s cubic-bezier(0.2,0.8,0.3,1), opacity 0.06s'
-        : 'opacity 0.06s',
-    }} />
-  );
+  // ── Flipper: child that rotates on Y axis ───────────────────────────────────
+  const flipper = document.createElement('div');
+  flipper.style.cssText =
+    'position:relative;width:100%;height:100%;transform-style:preserve-3d;';
+  flipper.appendChild(makeCardBack());
+  if (!landFaceDown) flipper.appendChild(makeCardFront(card));
+  wrapper.appendChild(flipper);
+  document.body.appendChild(wrapper);
+
+  // ── Arc: 5-keyframe curved path that starts fast and slows at destination ──
+  wrapper.animate([
+    { transform: 'translate(0px,0px) rotate(0deg)',                                              offset: 0    },
+    { transform: `translate(${dx*.35}px,${dy*.35 - arcH*.9}px) rotate(${tilt*.35}deg)`,         offset: 0.22 },
+    { transform: `translate(${dx*.58}px,${dy*.58 - arcH*1.05}px) rotate(${tilt*.6}deg)`,        offset: 0.50 },
+    { transform: `translate(${dx*.80}px,${dy*.80 - arcH*.28}px) rotate(${tilt*.88}deg)`,        offset: 0.76 },
+    { transform: `translate(${dx}px,${dy}px) rotate(${tilt}deg)`,                               offset: 1    },
+  ], { duration: arcDur, easing: 'linear', fill: 'forwards' });
+
+  // ── Flip: back → front (only for face-up cards) ─────────────────────────────
+  if (!landFaceDown) {
+    flipper.animate(
+      [{ transform: 'rotateY(0deg)' }, { transform: 'rotateY(180deg)' }],
+      { duration: flipDur, delay: flipDelay, easing: 'ease-in-out', fill: 'forwards' },
+    );
+  }
+
+  const t = setTimeout(() => { wrapper.remove(); onLand(); }, cleanupMs);
+  return () => { clearTimeout(t); wrapper.remove(); };
 }
 
 // ── Main Game component ──────────────────────────────────────────────────────
@@ -84,15 +132,16 @@ export default function Game() {
   const [betInput,  setBetInput]  = useState(100);
   const [easterEgg, setEasterEgg] = useState(false);
 
-  // Flying card animation
-  const [flyingCards,      setFlyingCards]      = useState<FlyingCardData[]>([]);
-  const [visibleCardKeys,  setVisibleCardKeys]  = useState<Set<string> | null>(null); // null = show all
+  // null = show all cards; Set = only show cards whose key is in the set (animation in progress)
+  const [visibleCardKeys, setVisibleCardKeys] = useState<Set<string> | null>(null);
 
-  const dealerRanRef      = useRef(false);
-  const broadcastRef      = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const prevPhaseRef      = useRef<string | null>(null);
-  const dealerAreaRef     = useRef<HTMLDivElement>(null);
-  const playerColumnRefs  = useRef<Map<string, HTMLDivElement>>(new Map());
+  const dealerRanRef     = useRef(false);
+  const broadcastRef     = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const prevPhaseRef     = useRef<string | null>(null);
+  const dealerAreaRef    = useRef<HTMLDivElement>(null);
+  const playerColumnRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const animCancelsRef   = useRef<Array<() => void>>([]);  // cleanup fns for in-flight cards
+  const animTimersRef    = useRef<Array<ReturnType<typeof setTimeout>>>([]);
 
   function triggerEasterEgg() {
     setEasterEgg(true);
@@ -144,70 +193,102 @@ export default function Game() {
     };
   }, [roomId]);
 
-  // ── Flying card animation: trigger on betting → player_turns ───────────────
+  // ── Cancel all in-flight animations on unmount ─────────────────────────────
+  useEffect(() => () => {
+    animCancelsRef.current.forEach(fn => fn());
+    animTimersRef.current.forEach(clearTimeout);
+  }, []);
+
+  // ── Deal animation: fires once on betting → player_turns transition ─────────
   useEffect(() => {
     if (!gameState) return;
     const prev = prevPhaseRef.current;
     prevPhaseRef.current = gameState.phase;
-
     if (prev !== 'betting' || gameState.phase !== 'player_turns') return;
 
     const snapshot = gameState;
-    setVisibleCardKeys(new Set()); // hide all real cards
+    setVisibleCardKeys(new Set()); // hide real cards while animation plays
 
-    // Wait one frame so player-column DOM elements exist
-    setTimeout(() => {
+    // Small wait so React has painted the player columns into the DOM
+    const initTimer = setTimeout(() => {
       const dealerRect = dealerAreaRef.current?.getBoundingClientRect();
       if (!dealerRect) { setVisibleCardKeys(null); return; }
 
+      // Source = center of dealer area (where the deck lives)
       const srcX = dealerRect.left + dealerRect.width / 2 - 27;
-      const srcY = dealerRect.top  + dealerRect.height / 2 - 39;
+      const srcY = dealerRect.top  + dealerRect.height * 0.45 - 39;
 
       const uniquePlayerIds = [...new Set(snapshot.play_order.map(e => e.player_id))];
       const N = uniquePlayerIds.length;
-      const cards: FlyingCardData[] = [];
 
-      // Two rounds: first card to everyone, then second card to everyone
+      // Build the full deal sequence: round 0 (first card to everyone),
+      // then round 1 (second card to everyone).
+      interface SeqItem {
+        seqDelay: number;
+        dstX: number; dstY: number;
+        card: Card;
+        landFaceDown: boolean;
+        cardKey: string;
+      }
+      const sequence: SeqItem[] = [];
+
       for (let round = 0; round < 2; round++) {
-        for (let pi = 0; pi <= N; pi++) {  // pi === N means dealer
-          const isDealer = pi === N;
-          const delay    = (round * (N + 1) + pi) * 420;
+        for (let pi = 0; pi <= N; pi++) {
+          const isDealerSlot = pi === N;
+          const seqDelay     = (round * (N + 1) + pi) * 150;
 
-          let endX: number, endY: number, cardKey: string;
+          let dstX: number, dstY: number, card: Card | undefined,
+              landFaceDown: boolean, cardKey: string;
 
-          if (isDealer) {
-            // Dealer's card lands slightly below the source (in dealer area)
-            endX    = srcX;
-            endY    = srcY + (round === 1 ? 10 : 0);
-            cardKey = `dealer_${round}`;
+          if (isDealerSlot) {
+            // Land slightly left/right of dealer area center for each card
+            dstX = dealerRect.left + dealerRect.width / 2 - 27 + (round === 0 ? -30 : 6);
+            dstY = dealerRect.top  + 44;
+            card = snapshot.dealer_hand[round];
+            landFaceDown = round === 1; // hole card stays face-down
+            cardKey      = `dealer_${round}`;
           } else {
             const playerId = uniquePlayerIds[pi];
             const colEl    = playerColumnRefs.current.get(playerId);
             const colRect  = colEl?.getBoundingClientRect();
-            endX    = colRect ? colRect.left + colRect.width / 2 - 27 : srcX;
-            endY    = colRect ? colRect.top  + 30                       : srcY + 180;
-            cardKey = `${playerId}_${round}`;
+            dstX    = colRect ? colRect.left + colRect.width / 2 - 27 : srcX;
+            dstY    = colRect ? colRect.top  + 62                       : srcY + 200;
+            card     = snapshot.player_hands[playerId]?.[0]?.cards?.[round];
+            landFaceDown = false;
+            cardKey  = `${playerId}_${round}`;
           }
 
-          cards.push({
-            id: `${cardKey}_${Date.now()}`,
-            startX: srcX, startY: srcY,
-            endX, endY,
-            delay,
-            cardKey,
-          });
+          if (card) sequence.push({ seqDelay, dstX, dstY, card, landFaceDown, cardKey });
         }
       }
 
-      setFlyingCards(cards);
+      const total = sequence.length;
+      let landed  = 0;
 
-      // After all cards have landed, show everything and clear flying cards
-      const totalMs = (N + 1) * 2 * 420 + 500;
-      setTimeout(() => {
-        setVisibleCardKeys(null);
-        setFlyingCards([]);
-      }, totalMs);
-    }, 60);
+      animCancelsRef.current = [];
+      animTimersRef.current  = [];
+
+      for (const item of sequence) {
+        const t = setTimeout(() => {
+          const cancel = animateCard(
+            srcX, srcY, item.dstX, item.dstY,
+            item.card, item.landFaceDown,
+            () => {
+              setVisibleCardKeys(prev =>
+                prev === null ? null : new Set([...prev, item.cardKey])
+              );
+              if (++landed >= total) {
+                setTimeout(() => setVisibleCardKeys(null), 60);
+              }
+            },
+          );
+          animCancelsRef.current.push(cancel);
+        }, item.seqDelay);
+        animTimersRef.current.push(t);
+      }
+    }, 80);
+
+    animTimersRef.current.push(initTimer);
   }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function isCardVisible(cardKey: string): boolean {
@@ -888,21 +969,6 @@ export default function Game() {
           </div>
         </div>
       )}
-
-      {/* Flying card animation overlay */}
-      {flyingCards.map(fc => (
-        <FlyingCardEl
-          key={fc.id}
-          startX={fc.startX} startY={fc.startY}
-          endX={fc.endX}     endY={fc.endY}
-          delay={fc.delay}
-          onLand={() => {
-            setVisibleCardKeys(prev =>
-              prev === null ? null : new Set([...prev, fc.cardKey])
-            );
-          }}
-        />
-      ))}
 
       {easterEgg && <div className="easter-egg-overlay">Lasst uns ownen 🃏</div>}
     </div>
