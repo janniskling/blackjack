@@ -654,6 +654,76 @@ body {
   100% { opacity: 0; }
 }
 
+/* ─── Boxing Feature ─────────────────────────────────────── */
+.boxing-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+}
+
+.boxing-section-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.85);
+}
+
+.boxing-hint {
+  font-weight: 400;
+  color: rgba(255,255,255,0.45);
+}
+
+.boxing-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.boxing-player-name {
+  flex: 1;
+  font-size: 0.85rem;
+  color: rgba(255,255,255,0.8);
+}
+
+.boxing-amount-input {
+  width: 80px;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(0,0,0,0.3);
+  color: #fff;
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.boxing-chips-label {
+  font-size: 0.75rem;
+  color: rgba(255,255,255,0.45);
+  width: 34px;
+}
+
+.boxing-total {
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.55);
+  margin-top: 0.25rem;
+}
+
+.boxing-total.over-budget {
+  color: #ff6666;
+  font-weight: 600;
+}
+
+.boxing-bet-indicator {
+  display: block;
+  font-size: 0.72rem;
+  color: #f0c060;
+  margin-top: 0.1rem;
+}
+
 /* ─── Responsive ─────────────────────────────────────────── */
 @media (max-width: 600px) {
   .home h1 { font-size: 2.2rem; }

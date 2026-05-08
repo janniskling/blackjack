@@ -105,6 +105,7 @@ export default function Lobby() {
         player_bets: {},
         player_chips: playerChips,
         pvp_dealer_id: pvpDealerId,
+        boxing_bets: {},
         updated_at: new Date().toISOString(),
       });
 

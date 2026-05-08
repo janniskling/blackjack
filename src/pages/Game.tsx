@@ -135,6 +135,9 @@ export default function Game() {
   // null = show all cards; Set = only show cards whose key is in the set (animation in progress)
   const [visibleCardKeys, setVisibleCardKeys] = useState<Set<string> | null>(null);
 
+  // boxing_bets[target_player_id] = chips I'm staking on their hand this round
+  const [myBoxingBets, setMyBoxingBets] = useState<Record<string, number>>({});
+
   const dealerRanRef     = useRef(false);
   const broadcastRef     = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const prevPhaseRef     = useRef<string | null>(null);
@@ -291,6 +294,11 @@ export default function Game() {
     animTimersRef.current.push(initTimer);
   }, [gameState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reset local boxing bets whenever a new round starts
+  useEffect(() => {
+    if (gameState?.phase === 'betting') setMyBoxingBets({});
+  }, [gameState?.phase]);
+
   function isCardVisible(cardKey: string): boolean {
     return visibleCardKeys === null || visibleCardKeys.has(cardKey);
   }
@@ -317,6 +325,12 @@ export default function Game() {
           else                                  result = determineWinner(hand.cards, finalHand);
           if      (result === 'win')  newChips[pid] += hand.status === 'blackjack' ? Math.floor(hand.bet * 2.5) : hand.bet * 2;
           else if (result === 'push') newChips[pid] += hand.bet;
+          // Boxing payouts
+          for (const [boxerId, boxingAmt] of Object.entries(hand.boxing_bets ?? {})) {
+            if (!(boxerId in newChips)) continue;
+            if      (result === 'win')  newChips[boxerId] += hand.status === 'blackjack' ? Math.floor(boxingAmt * 2.5) : boxingAmt * 2;
+            else if (result === 'push') newChips[boxerId] += boxingAmt;
+          }
           return { ...hand, result };
         });
       }
@@ -361,6 +375,12 @@ export default function Game() {
         else                                  result = determineWinner(hand.cards, finalDealerHand);
         if      (result === 'win')  newChips[pid] += hand.status === 'blackjack' ? Math.floor(hand.bet * 2.5) : hand.bet * 2;
         else if (result === 'push') newChips[pid] += hand.bet;
+        // Boxing payouts
+        for (const [boxerId, boxingAmt] of Object.entries(hand.boxing_bets ?? {})) {
+          if (!(boxerId in newChips)) continue;
+          if      (result === 'win')  newChips[boxerId] += hand.status === 'blackjack' ? Math.floor(boxingAmt * 2.5) : boxingAmt * 2;
+          else if (result === 'push') newChips[boxerId] += boxingAmt;
+        }
         return { ...hand, result };
       });
     }
@@ -446,13 +466,25 @@ export default function Game() {
       const bettingPlayers = pvpDealerId ? allActive.filter(p => p.id !== pvpDealerId) : allActive;
       const allBet         = bettingPlayers.length > 0 && bettingPlayers.every(p => newBets[p.id] !== undefined);
 
+      // Merge my boxing bets into the running total for this round
+      const stateBoxing = gameState.boxing_bets ?? {};
+      const mergedBoxing: Record<string, Record<string, number>> = { ...stateBoxing };
+      for (const [targetId, amount] of Object.entries(myBoxingBets)) {
+        if (amount > 0 && bettingPlayers.some(p => p.id === targetId)) {
+          mergedBoxing[targetId] = { ...(mergedBoxing[targetId] ?? {}), [myPlayerId]: amount };
+        }
+      }
+
       if (!allBet) {
         await supabase.from('game_state').update({
-          player_bets: newBets, updated_at: new Date().toISOString(),
+          player_bets: newBets,
+          boxing_bets: mergedBoxing,
+          updated_at: new Date().toISOString(),
         }).eq('room_id', roomId);
         return;
       }
 
+      // All players have bet — deal cards
       let deck = createDeck();
       const playerHandsMap: Record<string, PlayerHand[]> = {};
 
@@ -462,7 +494,11 @@ export default function Game() {
         const { card: c2, deck: d2 } = dealCard(deck); deck = d2;
         const cards  = [c1, c2];
         const status = isBlackjack(cards) ? 'blackjack' : 'playing';
-        playerHandsMap[p.id] = [{ cards, status, bet: b, doubled: false }];
+        const betsOnThisPlayer = mergedBoxing[p.id] ?? {};
+        playerHandsMap[p.id] = [{
+          cards, status, bet: b, doubled: false,
+          ...(Object.keys(betsOnThisPlayer).length > 0 && { boxing_bets: betsOnThisPlayer }),
+        }];
       }
 
       const { card: dc1, deck: d3 } = dealCard(deck); deck = d3;
@@ -480,6 +516,13 @@ export default function Game() {
         if (!(p.id in newChips)) newChips[p.id] = p.chips;
         newChips[p.id] -= newBets[p.id];
       }
+      // Deduct boxing bets from the boxers
+      for (const [targetId, boxers] of Object.entries(mergedBoxing)) {
+        if (!(targetId in playerHandsMap)) continue;
+        for (const [boxerId, amount] of Object.entries(boxers)) {
+          if (boxerId in newChips) newChips[boxerId] -= amount;
+        }
+      }
 
       const phase = playOrder.length === 0 ? 'dealer_turn' : 'player_turns';
 
@@ -487,8 +530,11 @@ export default function Game() {
         deck, dealer_hand: dealerHand, player_hands: playerHandsMap,
         play_order: playOrder, current_player_index: 0,
         phase, player_bets: newBets, player_chips: newChips,
+        boxing_bets: {}, // cleared — now lives inside each PlayerHand
         updated_at: new Date().toISOString(),
       }).eq('room_id', roomId).eq('phase', 'betting');
+
+      setMyBoxingBets({});
     } finally {
       setActing(false);
     }
@@ -542,11 +588,28 @@ export default function Game() {
       const { card, deck } = dealCard(gameState.deck);
       const newCards = [...hand.cards, card];
       const bust     = isBust(newCards);
-      const newHands = { ...gameState.player_hands };
-      newHands[entry.player_id] = [...gameState.player_hands[entry.player_id]];
-      newHands[entry.player_id][entry.hand_index] = { ...hand, cards: newCards, status: bust ? 'bust' : 'stand', bet: hand.bet * 2, doubled: true };
       const newChips = { ...gameState.player_chips };
       newChips[entry.player_id] -= hand.bet;
+
+      // Boxers must also double; if they can't afford it they forfeit their boxing bet
+      const originalBoxing = hand.boxing_bets ?? {};
+      const updatedBoxing: Record<string, number> = {};
+      for (const [boxerId, boxingAmount] of Object.entries(originalBoxing)) {
+        const boxerHas = newChips[boxerId] ?? 0;
+        if (boxerHas >= boxingAmount) {
+          newChips[boxerId] = boxerHas - boxingAmount;
+          updatedBoxing[boxerId] = boxingAmount * 2;
+        }
+        // can't afford → forfeits boxing bet (chips already gone from initial deal)
+      }
+
+      const newHands = { ...gameState.player_hands };
+      newHands[entry.player_id] = [...gameState.player_hands[entry.player_id]];
+      newHands[entry.player_id][entry.hand_index] = {
+        ...hand, cards: newCards, status: bust ? 'bust' : 'stand',
+        bet: hand.bet * 2, doubled: true,
+        ...(Object.keys(updatedBoxing).length > 0 && { boxing_bets: updatedBoxing }),
+      };
       await advanceTurn(newHands, deck, gameState.play_order, gameState.current_player_index, newChips);
     } finally { setActing(false); }
   }
@@ -566,8 +629,32 @@ export default function Game() {
       const [card1, card2] = hand.cards;
       const { card: nc1, deck: d1 } = dealCard(deck); deck = d1;
       const { card: nc2, deck: d2 } = dealCard(deck); deck = d2;
-      const hand1: PlayerHand = { cards: [card1, nc1], status: isBlackjack([card1, nc1]) ? 'blackjack' : 'playing', bet: hand.bet, doubled: false };
-      const hand2: PlayerHand = { cards: [card2, nc2], status: isBlackjack([card2, nc2]) ? 'blackjack' : 'playing', bet: hand.bet, doubled: false };
+
+      const newChips = { ...gameState.player_chips };
+      newChips[player_id] -= hand.bet;
+
+      // Boxing: hand1 keeps original bets; hand2 requires boxers to match (if they can afford it)
+      const originalBoxing = hand.boxing_bets ?? {};
+      const hand2Boxing: Record<string, number> = {};
+      for (const [boxerId, amount] of Object.entries(originalBoxing)) {
+        const boxerHas = newChips[boxerId] ?? 0;
+        if (boxerHas >= amount) {
+          newChips[boxerId] = boxerHas - amount;
+          hand2Boxing[boxerId] = amount;
+        }
+        // can't afford → follows hand1 only
+      }
+
+      const hand1: PlayerHand = {
+        cards: [card1, nc1], status: isBlackjack([card1, nc1]) ? 'blackjack' : 'playing',
+        bet: hand.bet, doubled: false,
+        ...(Object.keys(originalBoxing).length > 0 && { boxing_bets: originalBoxing }),
+      };
+      const hand2: PlayerHand = {
+        cards: [card2, nc2], status: isBlackjack([card2, nc2]) ? 'blackjack' : 'playing',
+        bet: hand.bet, doubled: false,
+        ...(Object.keys(hand2Boxing).length > 0 && { boxing_bets: hand2Boxing }),
+      };
       const newPlayerHands = { ...gameState.player_hands };
       const playerHandArr  = [...newPlayerHands[player_id]];
       playerHandArr[hand_index] = hand1;
@@ -579,8 +666,6 @@ export default function Game() {
         { player_id, hand_index: newHandIndex },
         ...gameState.play_order.slice(gameState.current_player_index + 1),
       ];
-      const newChips = { ...gameState.player_chips };
-      newChips[player_id] -= hand.bet;
       let nextPlayIdx = gameState.current_player_index;
       if (hand1.status === 'blackjack') nextPlayIdx += 1;
       await supabase.from('game_state').update({
@@ -621,6 +706,7 @@ export default function Game() {
       deck: [], dealer_hand: [], player_hands: emptyHands,
       play_order: [], current_player_index: 0,
       phase: 'betting', player_bets: {}, player_chips: chips,
+      boxing_bets: {},
       updated_at: new Date().toISOString(),
     }).eq('room_id', roomId);
 
@@ -789,9 +875,57 @@ export default function Game() {
                   onChange={e => setBetInput(Math.max(1, Math.min(Number(e.target.value), myChips)))}
                   className="bet-number-input" />
               </div>
-              <button className="btn btn-primary" onClick={handlePlaceBet} disabled={acting}>
-                Place Bet — {fmt(Math.min(betInput, myChips))} chips
-              </button>
+
+              {/* Boxing bets — bet on another player's hand */}
+              {bettingPlayers.filter(p => p.id !== myPlayerId).length > 0 && (() => {
+                const ownBet = Math.min(betInput, myChips);
+                const totalBoxing = Object.values(myBoxingBets).reduce((a, b) => a + b, 0);
+                const totalSpent  = ownBet + totalBoxing;
+                const overBudget  = totalSpent > myChips;
+                return (
+                  <div className="boxing-section">
+                    <div className="boxing-section-label">🥊 Boxing <span className="boxing-hint">— bet on another player's hand</span></div>
+                    {bettingPlayers.filter(p => p.id !== myPlayerId).map(p => {
+                      const otherBoxing = totalBoxing - (myBoxingBets[p.id] ?? 0);
+                      const maxForThis  = Math.max(0, myChips - ownBet - otherBoxing);
+                      return (
+                        <div key={p.id} className="boxing-row">
+                          <span className="boxing-player-name">{p.name}</span>
+                          <input
+                            type="number"
+                            min={0}
+                            max={maxForThis + (myBoxingBets[p.id] ?? 0)}
+                            value={myBoxingBets[p.id] ?? 0}
+                            onChange={e => {
+                              const raw = Math.max(0, Number(e.target.value));
+                              const capped = Math.min(raw, maxForThis + (myBoxingBets[p.id] ?? 0));
+                              setMyBoxingBets(prev => ({ ...prev, [p.id]: capped }));
+                            }}
+                            className="boxing-amount-input"
+                          />
+                          <span className="boxing-chips-label">chips</span>
+                        </div>
+                      );
+                    })}
+                    {totalBoxing > 0 && (
+                      <div className={`boxing-total${overBudget ? ' over-budget' : ''}`}>
+                        Total: {fmt(ownBet)} own + {fmt(totalBoxing)} boxing = {fmt(totalSpent)} / {fmt(myChips)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {(() => {
+                const ownBet = Math.min(betInput, myChips);
+                const totalBoxing = Object.values(myBoxingBets).reduce((a, b) => a + b, 0);
+                const overBudget  = ownBet + totalBoxing > myChips;
+                return (
+                  <button className="btn btn-primary" onClick={handlePlaceBet} disabled={acting || overBudget}>
+                    Place Bet — {fmt(ownBet)}{totalBoxing > 0 ? ` + 🥊${fmt(totalBoxing)}` : ''} chips
+                  </button>
+                );
+              })()}
             </div>
           ) : (
             <div className="bet-waiting-msg">
@@ -903,6 +1037,14 @@ export default function Game() {
                       <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.5)' }}>
                         Bet: {fmt(hand.bet)}{hand.doubled ? ' (2×)' : ''}
                       </span>
+                      {Object.entries(hand.boxing_bets ?? {}).map(([boxerId, boxingAmt]) => {
+                        const boxer = players.find(p => p.id === boxerId);
+                        return (
+                          <span key={boxerId} className="boxing-bet-indicator">
+                            🥊 {boxer?.name ?? '?'}: {fmt(boxingAmt)}
+                          </span>
+                        );
+                      })}
                       {hand.result && (
                         <span className={`result-badge result-${hand.result}`}>
                           {hand.result === 'win' ? '▲ WIN' : hand.result === 'lose' ? '▼ LOSE' : '= PUSH'}

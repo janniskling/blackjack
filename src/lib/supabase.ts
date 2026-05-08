@@ -32,6 +32,8 @@ export type PlayerHand = {
   bet: number;
   doubled: boolean;
   result?: 'win' | 'lose' | 'push';
+  // boxing_bets[boxer_player_id] = amount staked on this hand by that player
+  boxing_bets?: Record<string, number>;
 };
 
 export type PlayOrderEntry = {
@@ -52,5 +54,7 @@ export type GameState = {
   player_bets: Record<string, number>;
   player_chips: Record<string, number>;
   pvp_dealer_id?: string | null;
+  // boxing_bets[target_player_id][boxer_player_id] = amount — collected during betting phase
+  boxing_bets?: Record<string, Record<string, number>>;
   updated_at: string;
 };
