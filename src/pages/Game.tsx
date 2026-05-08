@@ -608,7 +608,8 @@ export default function Game() {
       newHands[entry.player_id][entry.hand_index] = {
         ...hand, cards: newCards, status: bust ? 'bust' : 'stand',
         bet: hand.bet * 2, doubled: true,
-        ...(Object.keys(updatedBoxing).length > 0 && { boxing_bets: updatedBoxing }),
+        // Explicit override so ...hand's boxing_bets doesn't leak through on forfeit
+        boxing_bets: Object.keys(updatedBoxing).length > 0 ? updatedBoxing : undefined,
       };
       await advanceTurn(newHands, deck, gameState.play_order, gameState.current_player_index, newChips);
     } finally { setActing(false); }
@@ -878,10 +879,8 @@ export default function Game() {
 
               {/* Boxing bets — bet on another player's hand */}
               {bettingPlayers.filter(p => p.id !== myPlayerId).length > 0 && (() => {
-                const ownBet = Math.min(betInput, myChips);
+                const ownBet      = Math.min(betInput, myChips);
                 const totalBoxing = Object.values(myBoxingBets).reduce((a, b) => a + b, 0);
-                const totalSpent  = ownBet + totalBoxing;
-                const overBudget  = totalSpent > myChips;
                 return (
                   <div className="boxing-section">
                     <div className="boxing-section-label">🥊 Boxing <span className="boxing-hint">— bet on another player's hand</span></div>
@@ -895,11 +894,18 @@ export default function Game() {
                             type="number"
                             min={0}
                             max={maxForThis + (myBoxingBets[p.id] ?? 0)}
-                            value={myBoxingBets[p.id] ?? 0}
+                            value={myBoxingBets[p.id] || ''}
+                            placeholder="0"
                             onChange={e => {
-                              const raw = Math.max(0, Number(e.target.value));
+                              const raw    = Math.max(0, Number(e.target.value) || 0);
                               const capped = Math.min(raw, maxForThis + (myBoxingBets[p.id] ?? 0));
-                              setMyBoxingBets(prev => ({ ...prev, [p.id]: capped }));
+                              setMyBoxingBets(prev => {
+                                if (capped === 0) {
+                                  const { [p.id]: _removed, ...rest } = prev;
+                                  return rest;
+                                }
+                                return { ...prev, [p.id]: capped };
+                              });
                             }}
                             className="boxing-amount-input"
                           />
@@ -908,21 +914,25 @@ export default function Game() {
                       );
                     })}
                     {totalBoxing > 0 && (
-                      <div className={`boxing-total${overBudget ? ' over-budget' : ''}`}>
-                        Total: {fmt(ownBet)} own + {fmt(totalBoxing)} boxing = {fmt(totalSpent)} / {fmt(myChips)}
+                      <div className="boxing-total">
+                        Total: {fmt(ownBet)} own + {fmt(totalBoxing)} boxing = {fmt(ownBet + totalBoxing)} / {fmt(myChips)}
                       </div>
                     )}
                   </div>
                 );
               })()}
 
+              {/* Place Bet button */}
               {(() => {
-                const ownBet = Math.min(betInput, myChips);
+                const ownBet      = Math.min(betInput, myChips);
                 const totalBoxing = Object.values(myBoxingBets).reduce((a, b) => a + b, 0);
                 const overBudget  = ownBet + totalBoxing > myChips;
+                const label       = totalBoxing > 0
+                  ? `Place Bet — ${fmt(ownBet)} + 🥊${fmt(totalBoxing)} chips`
+                  : `Place Bet — ${fmt(ownBet)} chips`;
                 return (
                   <button className="btn btn-primary" onClick={handlePlaceBet} disabled={acting || overBudget}>
-                    Place Bet — {fmt(ownBet)}{totalBoxing > 0 ? ` + 🥊${fmt(totalBoxing)}` : ''} chips
+                    {overBudget ? 'Reduce your bets first' : label}
                   </button>
                 );
               })()}
