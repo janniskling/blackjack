@@ -56,7 +56,7 @@ async function sendBlackjackSession(roomId: string, pvpDealerId: string | null):
       apikey: POKER_TRACKER_KEY,
       Authorization: `Bearer ${POKER_TRACKER_KEY}`,
     },
-    body: JSON.stringify({ date, type: 'blackjack', entries }),
+    body: JSON.stringify({ id: Date.now(), date, type: 'blackjack', entries }),
   });
   if (!res.ok) console.error('Poker Tracker: session POST failed', res.status, await res.text().catch(() => ''));
 }
