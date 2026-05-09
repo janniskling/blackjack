@@ -43,8 +43,8 @@ async function sendBlackjackSession(roomId: string, pvpDealerId: string | null):
   if (pvpDealerId) {
     const dealer = all.find(p => p.id === pvpDealerId);
     if (dealer) {
-      const sumOthers = entries.reduce((s, e) => s + e.amount, 0);
-      entries.push({ player: dealer.name, amount: -sumOthers });
+      const dealerAmount = -entries.reduce((s, e) => s + e.amount, 0);
+      if (dealerAmount !== 0) entries.push({ player: dealer.name, amount: dealerAmount });
     }
   }
 
