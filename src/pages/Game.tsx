@@ -19,6 +19,44 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 
 function fmt(n: number) { return n.toLocaleString(); }
 
+// ── Poker Tracker integration ────────────────────────────────────────────────
+const POKER_TRACKER_URL = 'https://jcfrufxdfkiufzbilueg.supabase.co/rest/v1/sessions';
+const POKER_TRACKER_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjZnJ1ZnhkZmtpdWZ6YmlsdWVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5MzMzMTMsImV4cCI6MjA5MjUwOTMxM30.HzjCYOJZVvJNe41BXl2fweI7eD54tyxYaERJLL4uBes';
+
+async function sendBlackjackSession(roomId: string, pvpDealerId: string | null): Promise<void> {
+  const { data } = await supabase
+    .from('players')
+    .select('id, name, chips, starting_chips')
+    .eq('room_id', roomId);
+  const all = (data ?? []) as { id: string; name: string; chips: number; starting_chips: number | null }[];
+  if (all.length === 0) return;
+
+  const regulars = pvpDealerId ? all.filter(p => p.id !== pvpDealerId) : all;
+  const entries: { player: string; amount: number }[] = regulars.map(p => ({
+    player: p.name,
+    amount: ((p.chips ?? 0) - (p.starting_chips ?? 0)) / 100,
+  }));
+
+  if (pvpDealerId) {
+    const dealer = all.find(p => p.id === pvpDealerId);
+    if (dealer) {
+      const sumOthers = entries.reduce((s, e) => s + e.amount, 0);
+      entries.push({ player: dealer.name, amount: -sumOthers });
+    }
+  }
+
+  const date = new Date().toISOString().split('T')[0];
+  await fetch(POKER_TRACKER_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: POKER_TRACKER_KEY,
+      Authorization: `Bearer ${POKER_TRACKER_KEY}`,
+    },
+    body: JSON.stringify({ date, type: 'blackjack', entries }),
+  });
+}
+
 // ── Card DOM helpers (used by the Web Animations API animation) ──────────────
 const SUIT_SYMBOLS: Record<string, string> = { hearts:'♥', diamonds:'♦', clubs:'♣', spades:'♠' };
 const RED_SUITS = new Set(['hearts', 'diamonds']);
@@ -745,14 +783,15 @@ export default function Game() {
     const chips = gameState?.player_chips[myPlayerId] ?? 0;
     await supabase.from('players').update({ is_active: false, chips }).eq('id', myPlayerId);
 
-    // Close the room if no non-dealer players remain, so it doesn't stay open forever
     if (roomId) {
       const pvpDealerId = gameState?.pvp_dealer_id ?? null;
       const { data: remaining } = await supabase
         .from('players').select('id').eq('room_id', roomId).eq('is_active', true);
-      const stillPlaying = (remaining ?? []).filter(p => p.id !== pvpDealerId);
-      if (stillPlaying.length === 0)
+      const stillPlaying = (remaining ?? []).filter((p: { id: string }) => p.id !== pvpDealerId);
+      if (stillPlaying.length === 0) {
+        await sendBlackjackSession(roomId, pvpDealerId);
         await supabase.from('rooms').update({ status: 'finished' }).eq('id', roomId);
+      }
     }
 
     localStorage.removeItem('playerId');
@@ -762,9 +801,12 @@ export default function Game() {
 
   async function handleDealerLeave() {
     await supabase.from('players').update({ is_active: false }).eq('id', myPlayerId);
-    // Mark room finished so no one can join
-    const { data: room } = await supabase.from('rooms').select('id').eq('code', code ?? '').single();
-    if (room) await supabase.from('rooms').update({ status: 'finished' }).eq('id', room.id);
+    // Send session only if room isn't already finished (last player cashout already sent it)
+    const { data: room } = await supabase.from('rooms').select('status').eq('id', roomId).single();
+    if (room && room.status !== 'finished') {
+      await sendBlackjackSession(roomId, gameState?.pvp_dealer_id ?? null);
+      await supabase.from('rooms').update({ status: 'finished' }).eq('id', roomId);
+    }
     localStorage.removeItem('playerId');
     localStorage.removeItem('roomCode');
     navigate('/');

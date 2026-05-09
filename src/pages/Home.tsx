@@ -61,7 +61,7 @@ export default function Home() {
 
       const { data: player, error: playerErr } = await supabase
         .from('players')
-        .insert({ room_id: room.id, name: createName.trim(), is_active: true, chips })
+        .insert({ room_id: room.id, name: createName.trim(), is_active: true, chips, starting_chips: chips })
         .select()
         .single();
 
@@ -102,7 +102,7 @@ export default function Home() {
 
       const { data: player, error: playerErr } = await supabase
         .from('players')
-        .insert({ room_id: room.id, name: joinName.trim(), is_active: true, chips })
+        .insert({ room_id: room.id, name: joinName.trim(), is_active: true, chips, starting_chips: chips })
         .select()
         .single();
 

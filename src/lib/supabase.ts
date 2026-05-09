@@ -23,6 +23,7 @@ export type Player = {
   name: string;
   is_active: boolean;
   chips: number;
+  starting_chips?: number;
   created_at: string;
 };
 
