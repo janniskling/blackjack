@@ -20,21 +20,24 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 function fmt(n: number) { return n.toLocaleString(); }
 
 // ── Poker Tracker integration ────────────────────────────────────────────────
-const POKER_TRACKER_URL = 'https://jcfrufxdfkiufzbilueg.supabase.co/rest/v1/sessions';
-const POKER_TRACKER_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjZnJ1ZnhkZmtpdWZ6YmlsdWVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY5MzMzMTMsImV4cCI6MjA5MjUwOTMxM30.HzjCYOJZVvJNe41BXl2fweI7eD54tyxYaERJLL4uBes';
+const POKER_TRACKER_URL = import.meta.env.VITE_POKER_TRACKER_URL as string;
+const POKER_TRACKER_KEY = import.meta.env.VITE_POKER_TRACKER_KEY as string;
 
 async function sendBlackjackSession(roomId: string, pvpDealerId: string | null): Promise<void> {
-  const { data } = await supabase
+  if (!POKER_TRACKER_URL || !POKER_TRACKER_KEY) return;
+
+  const { data, error } = await supabase
     .from('players')
     .select('id, name, chips, starting_chips')
     .eq('room_id', roomId);
-  const all = (data ?? []) as { id: string; name: string; chips: number; starting_chips: number | null }[];
-  if (all.length === 0) return;
+  if (error || !data || data.length === 0) return;
+
+  const all = data as { id: string; name: string; chips: number; starting_chips: number }[];
 
   const regulars = pvpDealerId ? all.filter(p => p.id !== pvpDealerId) : all;
   const entries: { player: string; amount: number }[] = regulars.map(p => ({
     player: p.name,
-    amount: ((p.chips ?? 0) - (p.starting_chips ?? 0)) / 100,
+    amount: (p.chips - p.starting_chips) / 100,
   }));
 
   if (pvpDealerId) {
@@ -46,7 +49,7 @@ async function sendBlackjackSession(roomId: string, pvpDealerId: string | null):
   }
 
   const date = new Date().toISOString().split('T')[0];
-  await fetch(POKER_TRACKER_URL, {
+  const res = await fetch(POKER_TRACKER_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -55,6 +58,7 @@ async function sendBlackjackSession(roomId: string, pvpDealerId: string | null):
     },
     body: JSON.stringify({ date, type: 'blackjack', entries }),
   });
+  if (!res.ok) console.error('Poker Tracker: session POST failed', res.status, await res.text().catch(() => ''));
 }
 
 // ── Card DOM helpers (used by the Web Animations API animation) ──────────────
@@ -789,7 +793,7 @@ export default function Game() {
         .from('players').select('id').eq('room_id', roomId).eq('is_active', true);
       const stillPlaying = (remaining ?? []).filter((p: { id: string }) => p.id !== pvpDealerId);
       if (stillPlaying.length === 0) {
-        await sendBlackjackSession(roomId, pvpDealerId);
+        await sendBlackjackSession(roomId, pvpDealerId).catch(e => console.error('Poker Tracker error:', e));
         await supabase.from('rooms').update({ status: 'finished' }).eq('id', roomId);
       }
     }
@@ -804,7 +808,7 @@ export default function Game() {
     // Send session only if room isn't already finished (last player cashout already sent it)
     const { data: room } = await supabase.from('rooms').select('status').eq('id', roomId).single();
     if (room && room.status !== 'finished') {
-      await sendBlackjackSession(roomId, gameState?.pvp_dealer_id ?? null);
+      await sendBlackjackSession(roomId, gameState?.pvp_dealer_id ?? null).catch(e => console.error('Poker Tracker error:', e));
       await supabase.from('rooms').update({ status: 'finished' }).eq('id', roomId);
     }
     localStorage.removeItem('playerId');
